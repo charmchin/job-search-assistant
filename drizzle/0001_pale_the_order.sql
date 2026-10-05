@@ -1,0 +1,1 @@
+ALTER TABLE `opportunities` ADD `reminder_days` text DEFAULT '[7,3,1,0]' NOT NULL;
