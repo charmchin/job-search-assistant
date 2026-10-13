@@ -140,6 +140,65 @@ const command = <A extends string, S extends z.ZodType>(
   });
 export const actionSchema = z.discriminatedUnion('action', [
   command(
+    'recordProgress',
+    z
+      .strictObject({
+        opportunityId: id,
+        expectedStatus: z.strictObject({
+          stage: opportunityShape.stage,
+          decision: opportunityShape.decision,
+          closedReason: opportunityShape.closedReason,
+        }),
+        stage: opportunityShape.stage.optional(),
+        occurredAt: time.optional(),
+        content: short.trim().default(''),
+        completedTasks: z
+          .array(
+            z.strictObject({
+              id,
+              expected: z.strictObject({
+                title: taskShape.title,
+                dueAt: time,
+                status: z.enum(['todo', 'doing']),
+              }),
+            }),
+          )
+          .max(100)
+          .default([]),
+        followUp: z
+          .strictObject({
+            title: taskShape.title,
+            dueAt: time,
+            expectedNextTaskId: id.nullable(),
+          })
+          .optional(),
+        milestone: z
+          .strictObject({ title: name, scheduledAt: time })
+          .optional(),
+      })
+      .superRefine((value, ctx) => {
+        if (value.stage && !value.occurredAt)
+          ctx.addIssue({ code: 'custom', message: '请选择进展实际发生的时间' });
+        if (!value.stage && value.occurredAt !== undefined)
+          ctx.addIssue({ code: 'custom', message: '发生时间须对应招聘阶段' });
+        if (
+          !value.stage &&
+          !value.completedTasks.length &&
+          !value.followUp &&
+          !value.milestone &&
+          !value.content
+        )
+          ctx.addIssue({ code: 'custom', message: '请至少记录一项进展' });
+        if (
+          new Set(value.completedTasks.map((task) => task.id)).size !==
+          value.completedTasks.length
+        )
+          ctx.addIssue({ code: 'custom', message: '不能重复选择同一任务' });
+        if (value.milestone && !value.milestone.scheduledAt)
+          ctx.addIssue({ code: 'custom', message: '请填写招聘节点时间' });
+      }),
+  ),
+  command(
     'createOpportunity',
     z.strictObject({
       ...opportunityShape,
@@ -177,6 +236,10 @@ export const actionSchema = z.discriminatedUnion('action', [
         .default([]),
       requirements: z.array(z.strictObject({ name })).max(100).default([]),
       draftId: id.optional(),
+      draftRevision: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
       // The capture dialog submits verified extraction metadata; the draft is
       // already stored separately. These fields never become opportunity columns.
       evidence: z.record(z.string(), z.string()).optional(),
@@ -353,13 +416,32 @@ export const actionSchema = z.discriminatedUnion('action', [
   ),
   command(
     'addActivity',
-    z.strictObject({
-      opportunityId: id,
-      content: text.trim().min(1),
-      type: name.default('note'),
-    }),
+    z
+      .strictObject({
+        opportunityId: id,
+        content: text.trim().min(1),
+        type: name.default('note'),
+        stage: opportunityShape.stage.optional(),
+        expectedStatus: z
+          .strictObject({
+            stage: opportunityShape.stage,
+            decision: opportunityShape.decision,
+            closedReason: opportunityShape.closedReason,
+          })
+          .optional(),
+      })
+      .superRefine((value, ctx) => {
+        if (Boolean(value.stage) !== Boolean(value.expectedStatus))
+          ctx.addIssue({
+            code: 'custom',
+            message: '同步阶段时须提供原状态，请刷新后重试',
+          });
+      }),
   ),
-  command('discardDraft', z.strictObject({ id })),
+  command(
+    'discardDraft',
+    z.strictObject({ id, draftRevision: z.string().regex(/^[a-f0-9]{64}$/) }),
+  ),
   command(
     'saveSettings',
     z
@@ -436,5 +518,7 @@ export function describeActionValidation(error: z.ZodError) {
     requestId: '请求标识',
   };
   const field = String(issue.path.at(-1) || '输入');
+  if (field === 'draftRevision')
+    return '草稿版本缺失或无效，请刷新页面及草稿列表后重新操作。';
   return `${label[field] || field}不合法：请检查必填内容、允许的取值及日期格式。时间需包含时区，名称不能为空。`;
 }

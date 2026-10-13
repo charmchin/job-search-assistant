@@ -10,6 +10,7 @@ import { applyTaskCommand } from './tasks';
 import { applyMilestoneCommand } from './milestones';
 import { applyMaterialCommand } from './materials';
 import { applyWorkspaceCommand } from './workspace';
+import { applyProgressCommand } from './progress';
 
 // Exhaustive dispatch: adding a schema command requires selecting its owner.
 // All handlers remain synchronous and share one transaction and timestamp.
@@ -20,6 +21,8 @@ export function applyCommand(
 ): ActionResult {
   const context = createActionContext(tx, timestamp);
   switch (command.action) {
+    case 'recordProgress':
+      return applyProgressCommand(context, command);
     case 'createOpportunity':
     case 'updateOpportunity':
     case 'deleteOpportunity':

@@ -26,6 +26,21 @@ afterEach(() => {
 });
 
 describe('AI 失败自动回退到可用规则草稿', () => {
+  it('DeepSeek 官方展示名称按正确 API ID 调用，非官方供应商保持原模型名', async () => {
+    vi.stubEnv('OPENAI_MODEL', 'DeepSeek-V4.1-Flash');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://api.deepseek.com');
+    const fetcher = vi.fn().mockResolvedValue(answer('{"role":"研发岗"}'));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await extractJob(text)).mode).toBe('ai');
+    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(body.model).toBe('deepseek-flash');
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    vi.stubEnv('OPENAI_BASE_URL', 'https://third-party.example.com');
+    await extractJob(text);
+    expect(JSON.parse(fetcher.mock.calls[1][1].body).model).toBe(
+      'DeepSeek-V4.1-Flash',
+    );
+  });
   it.each([
     ['2026-10-04T15:59:59.000Z', '2026-10-04'],
     ['2026-10-04T16:00:00.000Z', '2026-10-05'],
@@ -108,24 +123,25 @@ describe('AI 失败自动回退到可用规则草稿', () => {
   it('有效草稿规范化日期并保留真实证据，丢弃伪证据', async () => {
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          answer(
-            JSON.stringify({
-              organization: '星河科技',
-              role: '研发岗',
-              deadline: '2026-12-20',
-              evidence: { organization: '星河科技', role: '伪造证据' },
-              confidence: 0.8,
-            }),
-          ),
+      vi.fn().mockResolvedValue(
+        answer(
+          JSON.stringify({
+            organization: '星河科技',
+            role: '研发岗',
+            deadline: '2026-12-20',
+            evidence: { organization: '星河科技', role: '伪造证据' },
+            confidence: 0.8,
+          }),
         ),
+      ),
     );
     const result = await extractJob(text, 'https://jobs.example.com/1');
     expect(result.mode).toBe('ai');
     expect(result.extraction.deadline).toBe('2026-12-20T15:59:00.000Z');
-    expect(result.extraction.evidence).toEqual({ organization: '星河科技' });
+    expect(result.extraction.evidence).toEqual({
+      organization: '星河科技',
+      deadline: '网申截止：2026年12月20日',
+    });
     expect(result.warning).toContain('已移除');
   });
   it('不支持 JSON 模式时仅重试一次，共用总超时信号', async () => {

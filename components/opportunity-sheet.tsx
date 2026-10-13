@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -25,7 +25,17 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Textarea } from '@/components/ui/textarea';
-import { deadlineBucket, formatDateTime, STAGES } from '@/lib/domain';
+import {
+  deadlineBucket,
+  formatDateTime,
+  STAGES,
+  needsApplication,
+} from '@/lib/domain';
+import {
+  canMarkApplied,
+  currentStageAt,
+  progressPayload,
+} from '@/lib/opportunity-progress';
 import type {
   Material,
   Mutate,
@@ -42,6 +52,7 @@ import {
 import { DEFAULT_MILESTONE_MINUTES } from '@/lib/reminder-policy';
 import { useSaveAction } from '@/components/use-save-action';
 import { RequirementEditor } from '@/components/requirement-editor';
+import { ProgressActions } from './progress-actions';
 import { StageHistoryPanel } from '@/components/stage-history-panel';
 import { ActivityList } from '@/components/paged-workspace';
 import { TaskEditor } from './task-editor';
@@ -49,6 +60,7 @@ import {
   buildOpportunityUpdate,
   opportunityConflicts,
   opportunityFields,
+  opportunityStatusConflict,
 } from '@/lib/opportunity-edit';
 import {
   decisionLabel,
@@ -97,6 +109,7 @@ function OpportunitySheetSession({
     original: Opportunity;
     notes: string;
     review: string;
+    stage?: string;
   } | null>(null);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDue, setTaskDue] = useState('');
@@ -106,6 +119,10 @@ function OpportunitySheetSession({
     ...DEFAULT_MILESTONE_MINUTES,
   ]);
   const [activity, setActivity] = useState('');
+  const [activityStage, setActivityStage] = useState('');
+  const [activityOriginal, setActivityOriginal] = useState<Opportunity | null>(
+    null,
+  );
   const [requirementName, setRequirementName] = useState('');
   const [requirementNotes, setRequirementNotes] = useState('');
   const [editingRequirement, setEditingRequirement] = useState<string | null>(
@@ -119,6 +136,10 @@ function OpportunitySheetSession({
     Record<string, { value: string; original: Requirement }>
   >({});
   const [tab, setTab] = useState<'plan' | 'timeline' | 'source'>('plan');
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'instant' });
+  }, [tab, edit]);
   const saving = useSaveAction();
   const updateTask = async (task: Task, changes: Record<string, unknown>) => {
     const update = buildRecordUpdate('task', task, changes);
@@ -148,11 +169,13 @@ function OpportunitySheetSession({
         : {}),
     });
   const formUpdate = buildOpportunityUpdate(original, form);
+  const statusConflict = edit ? opportunityStatusConflict(form) : '';
   const notesUpdate = notesDraft
     ? buildOpportunityUpdate(notesDraft.original, notesDraft)
     : null;
   const save = () =>
     saving.run(async () => {
+      if (statusConflict) throw new Error(statusConflict);
       const result = formUpdate
         ? await mutate('updateOpportunity', formUpdate)
         : undefined;
@@ -195,12 +218,17 @@ function OpportunitySheetSession({
   const addActivity = () =>
     saving.run(async () => {
       if (!activity) return;
-      const result = await mutate('addActivity', {
-        opportunityId: opportunity.id,
-        content: activity,
-        type: 'note',
-      });
+      const result = await mutate(
+        'addActivity',
+        progressPayload(
+          activityOriginal ?? opportunity,
+          activity,
+          activityStage || undefined,
+        ),
+      );
       setActivity('');
+      setActivityStage('');
+      setActivityOriginal(null);
       return result;
     });
   const remove = async () => {
@@ -227,7 +255,10 @@ function OpportunitySheetSession({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="data-[side=right]:w-[min(920px,98vw)] data-[side=right]:sm:max-w-[920px] overflow-y-auto border-l-[#ddd8ce] bg-[#f6f4ee] p-0">
+      <SheetContent
+        ref={scrollRef}
+        className="data-[side=right]:w-[min(920px,98vw)] data-[side=right]:sm:max-w-[920px] overflow-y-auto border-l-[#ddd8ce] bg-[#f6f4ee] p-0"
+      >
         <fieldset
           disabled={saving.pending}
           className="contents"
@@ -272,6 +303,15 @@ function OpportunitySheetSession({
                     </span>
                   )}
                 </SheetDescription>
+                {currentStageAt(opportunity) && (
+                  <p className="mt-2 text-xs text-[#817b71]">
+                    {opportunity.stage === 'applied' ? '投递时间' : '阶段更新'}{' '}
+                    · {formatDateTime(currentStageAt(opportunity))}
+                  </p>
+                )}
+                <div className="mt-3">
+                  <ProgressActions item={opportunity} mutate={mutate} />
+                </div>
               </div>
             </div>
           </SheetHeader>
@@ -334,25 +374,35 @@ function OpportunitySheetSession({
                 修改后请点击保存。取消编辑或关闭详情会放弃未保存的修改。
               </p>
             )}
-            {edit ? (
+            {edit && (
+              <EditConflictNotice
+                update={formUpdate}
+                current={opportunity}
+                onDiscard={() => {
+                  if (!confirm('放弃本次未保存的修改，并载入最新岗位信息？'))
+                    return;
+                  setForm(opportunity);
+                  setOriginal(opportunity);
+                  saving.reset();
+                }}
+              />
+            )}
+            {statusConflict && (
+              <p
+                id="opportunity-status-conflict"
+                role="alert"
+                className="rounded-2xl border border-[#e9c9a1] bg-[#fff8ec] p-4 text-sm leading-6 text-[#795a29]"
+              >
+                {statusConflict}
+              </p>
+            )}
+            {edit && tab !== 'timeline' ? (
               <>
-                <EditConflictNotice
-                  update={formUpdate}
-                  current={opportunity}
-                  onDiscard={() => {
-                    if (!confirm('放弃本次未保存的修改，并载入最新岗位信息？'))
-                      return;
-                    setForm(opportunity);
-                    setOriginal(opportunity);
-                    saving.reset();
-                  }}
-                />
                 <EditForm
+                  section={tab}
                   form={form}
                   setForm={setForm}
                   updateFormList={updateFormList}
-                  save={save}
-                  hasChanges={Boolean(formUpdate)}
                 />
               </>
             ) : tab === 'plan' ? (
@@ -479,6 +529,10 @@ function OpportunitySheetSession({
                       label="截止时间"
                       value={formatDateTime(opportunity.deadline)}
                       warning={
+                        needsApplication(
+                          opportunity.stage,
+                          opportunity.decision,
+                        ) &&
                         deadlineBucket(
                           opportunity.deadline
                             ? new Date(opportunity.deadline)
@@ -857,8 +911,38 @@ function OpportunitySheetSession({
                   </div>
                 </DetailSection>
                 <DetailSection title="推进记录">
+                  <Field label="记录时同步阶段">
+                    <select
+                      aria-label="记录时同步阶段"
+                      value={activityStage}
+                      onChange={(e) => {
+                        setActivityStage(e.target.value);
+                        setActivityOriginal(
+                          e.target.value ? opportunity : null,
+                        );
+                      }}
+                      className="h-9 w-full rounded-lg border border-input bg-white px-3 text-sm"
+                    >
+                      <option value="">保持当前阶段</option>
+                      {STAGES.map((s) => (
+                        <option
+                          key={s.id}
+                          value={s.id}
+                          disabled={
+                            opportunity.decision === 'skip' && s.id !== 'closed'
+                          }
+                        >
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <p className="text-xs text-[#827c72]">
+                    选择阶段后，记录和状态会一起保存。仅填写文字时保留当前阶段。
+                  </p>
                   <div className="flex gap-2">
                     <Input
+                      aria-label="推进记录内容"
                       value={activity}
                       onChange={(e) => setActivity(e.target.value)}
                       placeholder="记录沟通、反馈或下一步…"
@@ -870,12 +954,26 @@ function OpportunitySheetSession({
                       }}
                     />
                     <Button
-                      disabled={!activity.trim()}
+                      disabled={saving.pending || !activity.trim()}
                       onClick={() => void addActivity()}
                     >
                       记录
                     </Button>
                   </div>
+                  {canMarkApplied(opportunity) &&
+                    /已投递|投递了|投递成功/.test(activity) &&
+                    !activityStage && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setActivityStage('applied');
+                          setActivityOriginal(opportunity);
+                        }}
+                      >
+                        同时标记为已投递
+                      </Button>
+                    )}
                   <ActivityList
                     opportunityId={opportunity.id}
                     updatedAt={opportunity.updatedAt}
@@ -896,6 +994,7 @@ function OpportunitySheetSession({
                         value={notesDraft?.notes ?? opportunity.notes}
                         onChange={(e) =>
                           setNotesDraft((draft) => ({
+                            ...draft,
                             original: draft?.original ?? opportunity,
                             notes: e.target.value,
                             review: draft?.review ?? opportunity.review,
@@ -909,6 +1008,7 @@ function OpportunitySheetSession({
                         value={notesDraft?.review ?? opportunity.review}
                         onChange={(e) =>
                           setNotesDraft((draft) => ({
+                            ...draft,
                             original: draft?.original ?? opportunity,
                             notes: draft?.notes ?? opportunity.notes,
                             review: e.target.value,
@@ -917,6 +1017,55 @@ function OpportunitySheetSession({
                         className="min-h-28"
                       />
                     </Field>
+                    <Field label="保存备注时同步阶段">
+                      <select
+                        aria-label="保存备注时同步阶段"
+                        value={notesDraft?.stage ?? ''}
+                        onChange={(e) =>
+                          setNotesDraft((draft) => ({
+                            original: draft?.original ?? opportunity,
+                            notes: draft?.notes ?? opportunity.notes,
+                            review: draft?.review ?? opportunity.review,
+                            stage: e.target.value || undefined,
+                          }))
+                        }
+                        className="h-9 w-full rounded-lg border border-input bg-white px-3 text-sm"
+                      >
+                        <option value="">保持当前阶段</option>
+                        {STAGES.map((s) => (
+                          <option
+                            key={s.id}
+                            value={s.id}
+                            disabled={
+                              opportunity.decision === 'skip' &&
+                              s.id !== 'closed'
+                            }
+                          >
+                            {s.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {canMarkApplied(opportunity) &&
+                      /已投递|投递了|投递成功/.test(
+                        notesDraft?.notes ?? opportunity.notes,
+                      ) &&
+                      !notesDraft?.stage && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setNotesDraft((draft) => ({
+                              original: draft?.original ?? opportunity,
+                              notes: draft?.notes ?? opportunity.notes,
+                              review: draft?.review ?? opportunity.review,
+                              stage: 'applied',
+                            }))
+                          }
+                        >
+                          同时标记为已投递
+                        </Button>
+                      )}
                     <EditConflictNotice
                       update={notesUpdate}
                       current={opportunity}
@@ -969,6 +1118,15 @@ function OpportunitySheetSession({
                 </div>
               </>
             )}
+            {edit && (
+              <Button
+                disabled={!formUpdate || Boolean(statusConflict)}
+                onClick={() => void save()}
+              >
+                <Check />
+                保存全部修改
+              </Button>
+            )}
           </div>
         </fieldset>
       </SheetContent>
@@ -1020,12 +1178,12 @@ function EditConflictNotice({
 }
 
 function EditForm({
+  section,
   form,
   setForm,
   updateFormList,
-  save,
-  hasChanges,
 }: {
+  section: 'plan' | 'source';
   form: Partial<Opportunity>;
   setForm: React.Dispatch<React.SetStateAction<Partial<Opportunity>>>;
   updateFormList: (
@@ -1033,9 +1191,38 @@ function EditForm({
     index: number,
     value: string,
   ) => void;
-  save: () => Promise<void>;
-  hasChanges: boolean;
 }) {
+  if (section === 'source')
+    return (
+      <section className="space-y-4 rounded-[24px] border border-[#e0dcd2] bg-white/75 p-5">
+        <h3 className="text-sm font-semibold">岗位原文与备注</h3>
+        {(
+          [
+            ['sourceName', '来源名称'],
+            ['sourceUrl', '来源链接'],
+            ['description', '岗位正文'],
+            ['specialNotes', '特殊注意事项'],
+            ['notes', '个人备注'],
+            ['review', '复盘'],
+          ] as const
+        ).map(([key, label]) => (
+          <Field key={key} label={label}>
+            {key === 'sourceName' || key === 'sourceUrl' ? (
+              <Input
+                value={form[key] || ''}
+                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+              />
+            ) : (
+              <Textarea
+                className={key === 'description' ? 'min-h-64' : 'min-h-28'}
+                value={form[key] || ''}
+                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+              />
+            )}
+          </Field>
+        ))}
+      </section>
+    );
   return (
     <section className="rounded-[24px] border border-[#e0dcd2] bg-white/75 p-5">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -1065,6 +1252,13 @@ function EditForm({
         </Field>
         <Field label="阶段">
           <select
+            aria-label="阶段"
+            aria-invalid={Boolean(opportunityStatusConflict(form))}
+            aria-describedby={
+              opportunityStatusConflict(form)
+                ? 'opportunity-status-conflict'
+                : undefined
+            }
             value={form.stage}
             onChange={(e) => setForm({ ...form, stage: e.target.value })}
             className="h-9 w-full rounded-lg border border-input bg-white px-3 text-sm"
@@ -1075,15 +1269,22 @@ function EditForm({
               </option>
             ))}
           </select>
+          <p className="text-xs leading-5 text-[#827c72]">
+            重新推进已放弃的机会时，请同时恢复投入判断和目标阶段。
+          </p>
         </Field>
         <Field label="投入判断">
           <select
+            aria-label="投入判断"
             value={form.decision}
             onChange={(e) =>
-              setForm({
-                ...form,
+              setForm((current) => ({
+                ...current,
                 decision: e.target.value as Opportunity['decision'],
-              })
+                ...(e.target.value === 'skip'
+                  ? { stage: 'closed', closedReason: 'withdrawn' as const }
+                  : {}),
+              }))
             }
             className="h-9 w-full rounded-lg border border-input bg-white px-3 text-sm"
           >
@@ -1251,14 +1452,6 @@ function EditForm({
           </div>
         ))}
       </div>
-      <Button
-        className="mt-6"
-        disabled={!hasChanges}
-        onClick={() => void save()}
-      >
-        <Check />
-        保存全部修改
-      </Button>
     </section>
   );
 }

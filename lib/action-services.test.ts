@@ -5,6 +5,9 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionError, createActionService } from './actions';
 import { ActionError as ServiceError } from './services/errors';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { extractionDrafts } from '@/db/schema';
+import { deleteVersion } from './delete-version';
 
 let client: Database.Database;
 let service: ReturnType<typeof createActionService>;
@@ -82,6 +85,9 @@ async function fixture() {
     )
     .run('draft-service-test', Date.now());
   return {
+    draftRevision: deleteVersion(
+      drizzle(client).select().from(extractionDrafts).get(),
+    ),
     opportunityId,
     taskId,
     materialId,
@@ -165,7 +171,10 @@ describe('实体服务保持统一写入边界', () => {
         updateRequirement: { id: f.requirementId, materialId: null },
         deleteRequirement: { id: f.requirementId },
         addActivity: { opportunityId: f.opportunityId, content: '跟进招聘' },
-        discardDraft: { id: 'draft-service-test' },
+        discardDraft: {
+          id: 'draft-service-test',
+          draftRevision: f.draftRevision,
+        },
         saveSettings: { model: 'local-test-model', staleDays: 6 },
       };
       const input = {

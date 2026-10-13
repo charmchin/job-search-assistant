@@ -7,6 +7,7 @@
   },
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1",
+    "browser:install": "playwright install chromium",
     "build": "node scripts/build.mjs",
     "start": "next start --hostname 127.0.0.1",
     "db:generate": "drizzle-kit generate",
@@ -15,7 +16,7 @@
     "test:isolation": "node scripts/check-test-isolation.mjs",
     "test:deps": "node scripts/check-dependency-tools.mjs",
     "test:e2e": "playwright test",
-    "lint": "oxlint app db lib components/workspace-app.tsx components/workspace-common.tsx components/workspace-views.tsx components/capture-dialog.tsx components/opportunity-sheet.tsx components/paged-workspace.tsx components/reminder-controls.tsx components/requirement-editor.tsx components/edit-conflict-notice.tsx components/task-editor.tsx",
+    "lint": "oxlint app db lib components/workspace-app.tsx components/workspace-common.tsx components/progress-actions.tsx components/workspace-views.tsx components/capture-dialog.tsx components/opportunity-sheet.tsx components/paged-workspace.tsx components/reminder-controls.tsx components/requirement-editor.tsx components/edit-conflict-notice.tsx components/task-editor.tsx",
     "format": "oxfmt"
   },
   "dependencies": {
@@ -32,6 +33,7 @@
     "input-otp": "1.4.2",
     "lucide-react": "1.31.0",
     "next": "16.3.8",
+    "playwright": "1.55.1",
     "react": "19.2.6",
     "react-day-picker": "9.8.1",
     "react-dom": "19.2.6",

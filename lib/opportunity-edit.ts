@@ -31,6 +31,18 @@ export const coupledOpportunityFields: OpportunityField[][] = [
   ['nextAction', 'nextActionAt'],
 ];
 
+export function opportunityStatusConflict({
+  stage,
+  decision,
+}: {
+  stage?: string;
+  decision?: string;
+}) {
+  return decision === 'skip' && stage && stage !== 'closed'
+    ? '“不再考虑”只能对应“未通过/放弃”。若要恢复到其他阶段，请先将投入判断改为“待判断”“值得投入”或“暂缓”。'
+    : '';
+}
+
 // JSON serializes Date and an ISO string identically. Array order is meaningful.
 export const sameEditValue = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);

@@ -267,6 +267,26 @@ describe('遗漏、终态、重启与失败', () => {
       ]),
     );
   });
+  it.each(['applied', 'assessment', 'interview', 'waiting'])(
+    '%s 停止投递截止提醒，跟进任务和招聘节点继续提醒',
+    (stage) => {
+      opp('a', stage, 'pursue', '2026-12-12T23:59:00+08:00');
+      milestone('招聘节点', 'a', '2026-12-12T14:00:00+08:00', [0]);
+      task('跟进招聘反馈', 'a', '2026-12-12T10:00:00+08:00');
+      const candidates = createReminderEngine(client, send).collect()
+        .candidates;
+      expect(candidates).toHaveLength(2);
+      expect(candidates.some((row) => row.entityType === 'opportunity')).toBe(
+        false,
+      );
+      client.prepare("UPDATE opportunities SET stage='preparing'").run();
+      expect(
+        createReminderEngine(client, send)
+          .collect()
+          .candidates.some((row) => row.entityType === 'opportunity'),
+      ).toBe(true);
+    },
+  );
   it.each(['done', 'skipped'])(
     '完成或跳过的任务/节点不提醒（%s）',
     (status) => {

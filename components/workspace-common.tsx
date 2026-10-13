@@ -15,8 +15,15 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { deadlineBucket, formatDateTime, STAGES } from '@/lib/domain';
-import type { Opportunity, Task } from '@/lib/client-types';
+import {
+  deadlineBucket,
+  formatDateTime,
+  STAGES,
+  needsApplication,
+} from '@/lib/domain';
+import type { Mutate, Opportunity, Task } from '@/lib/client-types';
+import { currentStageAt } from '@/lib/opportunity-progress';
+import { ProgressActions } from './progress-actions';
 import { toShanghaiInput, fromShanghaiInput } from '@/lib/reminder-policy';
 
 export const priorityLabel = { high: '重点', medium: '常规', low: '低优先' };
@@ -63,13 +70,23 @@ export function Field({
   );
 }
 
-export function StageBadge({ stage }: { stage: string }) {
+export function StageBadge({
+  stage,
+  prominent = false,
+}: {
+  stage: string;
+  prominent?: boolean;
+}) {
   const item = STAGES.find((entry) => entry.id === stage);
   return (
     <Badge
       variant="outline"
-      className="rounded-full bg-white/70 px-2.5 py-1 font-medium"
-      style={{ color: item?.color, borderColor: `${item?.color}45` }}
+      className={`rounded-full px-2.5 py-1 ${prominent ? 'h-7 font-semibold' : 'bg-white/70 font-medium'}`}
+      style={{
+        color: item?.color,
+        borderColor: `${item?.color}45`,
+        ...(prominent ? { backgroundColor: `${item?.color}12` } : {}),
+      }}
     >
       {item?.label || stage}
     </Badge>
@@ -212,56 +229,104 @@ export function TaskRow({
 export function OpportunityCard({
   item,
   onClick,
+  mutate,
 }: {
   item: Opportunity;
   onClick: () => void;
+  mutate: Mutate;
 }) {
-  const deadline = deadlineBucket(
-    item.deadline ? new Date(item.deadline) : null,
-  );
+  const stageAt = currentStageAt(item);
+  const note = item.latestNote?.content || item.notes;
+  const awaitingApplication = needsApplication(item.stage, item.decision);
+  const deadline = awaitingApplication
+    ? deadlineBucket(item.deadline ? new Date(item.deadline) : null)
+    : 'none';
   return (
-    <button
-      onClick={onClick}
-      className="group w-full rounded-[20px] border border-[#e5e1d8] bg-[#fffefa] p-4 text-left shadow-[0_4px_18px_rgba(58,50,37,.04)] transition duration-200 hover:-translate-y-0.5 hover:border-[#b7cbc4] hover:shadow-[0_12px_32px_rgba(45,63,56,.10)]"
+    <article
+      aria-label={`${item.organization} · ${item.role}机会卡片`}
+      className="group flex h-full flex-col overflow-hidden rounded-[20px] border border-[#e5e1d8] bg-[#fffefa] text-left shadow-[0_4px_18px_rgba(58,50,37,.04)] transition duration-200 hover:-translate-y-0.5 hover:border-[#b7cbc4] hover:shadow-[0_12px_32px_rgba(45,63,56,.10)]"
     >
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="grid size-10 place-items-center rounded-[14px] bg-[#eaf3ef] text-sm font-bold text-[#2d6b5d]">
-          {item.organization.slice(0, 1)}
+      <button
+        onClick={onClick}
+        className="flex w-full flex-1 flex-col items-stretch p-4 text-left focus-visible:outline-2 focus-visible:outline-offset-[-4px] focus-visible:outline-[#2d6b5d]"
+      >
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <StageBadge stage={item.stage} prominent />
+            {item.stage === 'closed' &&
+              item.closedReason !== 'unknown' &&
+              item.closedReason && (
+                <span className="text-xs text-[#817c72]">
+                  {item.closedReason === 'rejected' ? '未通过' : '主动放弃'}
+                </span>
+              )}
+          </div>
+          <Badge
+            variant="outline"
+            className={`shrink-0 ${priorityClass[item.priority]}`}
+          >
+            {priorityLabel[item.priority]}
+          </Badge>
         </div>
-        <Badge variant="outline" className={priorityClass[item.priority]}>
-          {priorityLabel[item.priority]}
-        </Badge>
-      </div>
-      <p className="truncate text-xs font-medium text-[#807a70]">
-        {item.organization}
-      </p>
-      <h3 className="mt-1 line-clamp-2 min-h-11 text-[15px] font-semibold leading-[1.45] text-[#2f2c27]">
-        {item.role}
-      </h3>
-      {item.nextAction && (
-        <div className="mt-3 rounded-xl bg-[#f3f1eb] px-3 py-2.5">
-          <p className="text-[10px] font-semibold tracking-wide text-[#8a8479]">
-            下一步
-          </p>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#48443d]">
-            {item.nextAction}
-          </p>
+        <p className="truncate text-xs font-medium text-[#807a70]">
+          {item.organization}
+        </p>
+        <h3 className="mt-1 line-clamp-2 min-h-11 text-[15px] font-semibold leading-[1.45] text-[#2f2c27]">
+          {item.role}
+        </h3>
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#817c72]">
+          <span>{decisionLabel[item.decision]}</span>
+          {stageAt && (
+            <span>
+              {item.stage === 'applied' ? '投递时间' : '阶段更新'} ·{' '}
+              {formatDateTime(stageAt)}
+            </span>
+          )}
+        </div>
+        {note && (
+          <div className="mt-3 border-l-2 border-[#b8d1c9] pl-3">
+            <p className="text-[10px] font-semibold text-[#8a8479]">
+              {item.latestNote
+                ? `最近进展 · ${formatDateTime(item.latestNote.createdAt)}`
+                : '个人备注'}
+            </p>
+            <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-[#48443d]">
+              {note}
+            </p>
+          </div>
+        )}
+        {item.nextAction && (
+          <div className="mt-3 rounded-xl bg-[#f3f1eb] px-3 py-2.5">
+            <p className="text-[10px] font-semibold tracking-wide text-[#8a8479]">
+              下一步
+            </p>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#48443d]">
+              {item.nextAction}
+            </p>
+          </div>
+        )}
+        <div className="mt-auto flex items-center gap-2 pt-3 text-[11px] text-[#817c72]">
+          {item.location && (
+            <span className="flex min-w-0 items-center gap-1 truncate">
+              <MapPin className="size-3" />
+              {item.location}
+            </span>
+          )}
+          <span
+            className={`ml-auto shrink-0 ${deadline === 'overdue' ? 'font-semibold text-[#b2483b]' : ['72h', '7d'].includes(deadline) ? 'font-semibold text-[#9a671c]' : ''}`}
+          >
+            {item.deadline
+              ? `报名截止 ${formatDateTime(item.deadline)}`
+              : '截止未设置'}
+          </span>
+        </div>
+      </button>
+      {item.stage !== 'closed' && item.decision !== 'skip' && (
+        <div className="border-t border-[#ebe7df] px-4 py-3">
+          <ProgressActions item={item} mutate={mutate} />
         </div>
       )}
-      <div className="mt-3 flex items-center gap-2 text-[11px] text-[#817c72]">
-        {item.location && (
-          <span className="flex min-w-0 items-center gap-1 truncate">
-            <MapPin className="size-3" />
-            {item.location}
-          </span>
-        )}
-        <span
-          className={`ml-auto shrink-0 ${deadline === 'overdue' ? 'font-semibold text-[#b2483b]' : ['72h', '7d'].includes(deadline) ? 'font-semibold text-[#9a671c]' : ''}`}
-        >
-          {formatDateTime(item.deadline)}
-        </span>
-      </div>
-    </button>
+    </article>
   );
 }
 

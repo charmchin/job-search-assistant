@@ -92,6 +92,7 @@ export type Opportunity = {
   milestones: Milestone[];
   requirements: Requirement[];
   activities: Activity[];
+  latestNote?: Pick<Activity, 'id' | 'content' | 'createdAt'> | null;
 };
 export type WorkspaceState = {
   now: string;

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { asc, count, desc, eq } from 'drizzle-orm';
+import { asc, count, desc, eq, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import * as schema from '@/db/schema';
 import { isStale, compareTasks } from './domain';
@@ -24,7 +24,8 @@ export function groupByOpportunity<T extends { opportunityId: string | null }>(
 }
 
 // A synchronous read transaction gives all tables one SQLite snapshot.
-// History bodies and extraction bodies are loaded only through paged reads.
+// Only a bounded latest-note preview enters the snapshot; full activity and
+// extraction bodies are loaded through paged reads.
 export function readWorkspaceState(
   db: BetterSQLite3Database<typeof schema>,
   now = new Date(),
@@ -75,6 +76,23 @@ export function readWorkspaceState(
       .from(activities)
       .groupBy(activities.opportunityId)
       .all(),
+    latestNotes: tx
+      .select({
+        opportunityId: opportunities.id,
+        id: activities.id,
+        content: sql<string | null>`substr(${activities.content}, 1, 240)`,
+        createdAt: activities.createdAt,
+      })
+      .from(opportunities)
+      .leftJoin(
+        activities,
+        sql`${activities.id} = (
+        SELECT id FROM activities
+        WHERE opportunity_id = ${opportunities.id} AND type = 'note'
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      )`,
+      )
+      .all(),
   }));
   const opportunityMap = new Map(
     rows.opportunities.map((item) => [item.id, item]),
@@ -85,6 +103,14 @@ export function readWorkspaceState(
   const historyMap = groupByOpportunity(rows.stageHistory);
   const activityCounts = new Map(
     rows.activityCounts.map((row) => [row.opportunityId, row.value]),
+  );
+  const latestNotes = new Map(
+    rows.latestNotes.map((row) => [
+      row.opportunityId,
+      row.id && row.createdAt
+        ? { id: row.id, content: row.content ?? '', createdAt: row.createdAt }
+        : null,
+    ]),
   );
   const requirements = rows.requirements.map((item) => ({
     ...item,
@@ -133,6 +159,7 @@ export function readWorkspaceState(
         requirementViews.get(row.id)!,
       ),
       activities: [], // Compatibility field; use section=activities for records.
+      latestNote: latestNotes.get(item.id) ?? null,
     })),
     tasks: rows.tasks
       .map((task) => ({

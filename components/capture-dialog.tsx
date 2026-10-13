@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Check,
   FileText,
+  ExternalLink,
   Link2,
   Loader2,
   Paperclip,
@@ -35,9 +36,13 @@ import type { Extraction, Material, Mutate } from '@/lib/client-types';
 import type { SavedDraft } from '@/components/paged-workspace';
 import { buildRecordUpdate } from '@/lib/record-edit';
 import { EditConflictNotice } from './edit-conflict-notice';
+import { MutationError } from '@/lib/mutation-client';
+import { DUPLICATE_OPPORTUNITY_MESSAGE } from '@/lib/opportunity-duplicate';
 
 type CaptureResponse = {
   id?: string;
+  draftRevision?: string;
+  sourceText?: string;
   extraction?: Extraction;
   warning?: string;
   mode?: string;
@@ -46,6 +51,8 @@ type CaptureResponse = {
   guidance?: string;
   needsText?: boolean;
   duplicateId?: string;
+  duplicateOrganization?: string;
+  duplicateRole?: string;
 };
 
 export function CaptureDialog({
@@ -53,12 +60,14 @@ export function CaptureDialog({
   onOpenChange,
   mutate,
   onCreated,
+  onOpenExisting,
   initialDraft,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mutate: Mutate;
   onCreated: (id: string) => void;
+  onOpenExisting: (id: string) => Promise<void>;
   initialDraft?: SavedDraft | null;
 }) {
   const [url, setUrl] = useState(initialDraft?.sourceUrl ?? '');
@@ -66,8 +75,28 @@ export function CaptureDialog({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(initialDraft?.warning ?? '');
   const [guidance, setGuidance] = useState('');
-  const [draftId, setDraftId] = useState(
-    initialDraft?.extraction ? initialDraft.id : '',
+  const [duplicate, setDuplicate] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
+  const showDuplicate = (result: Record<string, unknown>) => {
+    if (typeof result.duplicateId !== 'string') return;
+    setDuplicate({
+      id: result.duplicateId,
+      label: [result.duplicateOrganization, result.duplicateRole]
+        .filter((value) => typeof value === 'string' && value)
+        .join(' · '),
+    });
+    setMessage(DUPLICATE_OPPORTUNITY_MESSAGE);
+    setGuidance('');
+    setSourceStatus('');
+    requestAnimationFrame(() =>
+      scrollRef.current?.scrollTo({ top: 0, behavior: 'auto' }),
+    );
+  };
+  const [draftId, setDraftId] = useState(initialDraft?.id ?? '');
+  const [draftRevision, setDraftRevision] = useState(
+    initialDraft?.draftRevision ?? '',
   );
   const [draft, setDraft] = useState<Extraction | null>(
     initialDraft?.extraction ?? null,
@@ -83,8 +112,10 @@ export function CaptureDialog({
     setText('');
     setMessage('');
     setGuidance('');
+    setDuplicate(null);
     setDraft(null);
     setDraftId('');
+    setDraftRevision('');
     setSourceStatus('');
     setMode('rules');
   };
@@ -99,22 +130,26 @@ export function CaptureDialog({
     setLoading(true);
     setMessage('');
     setGuidance('');
+    setDuplicate(null);
     setSourceStatus(
-      url && !text ? '正在读取招聘页面…' : '正在整理你粘贴的正文…',
+      url && !text
+        ? '正在读取招聘页面，动态页面可能需要稍等…'
+        : '正在整理你粘贴的正文…',
     );
     try {
       const response = await fetch('/api/capture', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, text }),
+        body: JSON.stringify({
+          url,
+          text,
+          ...(draftId ? { draftId, draftRevision } : {}),
+        }),
       });
       const result = (await response.json()) as CaptureResponse;
       if (!response.ok) {
         if (result.duplicateId) {
-          setMessage(
-            '这个岗位已经在机会库里了。可以关闭窗口后从机会库继续推进。',
-          );
-          setSourceStatus('');
+          showDuplicate(result);
           return;
         }
         setMessage(result.error || '暂时无法整理这个岗位');
@@ -130,12 +165,18 @@ export function CaptureDialog({
       setDraft(result.extraction || null);
       setMode(result.mode || 'rules');
       setDraftId(result.id || '');
+      setDraftRevision(result.draftRevision || '');
+      if (result.sourceText !== undefined) setText(result.sourceText);
       setSourceStatus(
         result.adapter === 'tencent'
           ? '腾讯招聘 · 官方岗位数据'
-          : text
-            ? '粘贴正文 · 已解析'
-            : '公开网页 · 已读取',
+          : result.adapter === 'browser'
+            ? '动态网页 · 已读取'
+            : result.adapter === 'structured'
+              ? '网页岗位数据 · 已读取'
+              : text
+                ? '粘贴正文 · 已解析'
+                : '公开网页 · 已读取',
       );
       setMessage(
         result.warning || '岗位已经整理成草稿，请完成投入判断后保存。',
@@ -162,18 +203,42 @@ export function CaptureDialog({
         notes: '',
         review: '',
         draftId,
+        draftRevision,
       });
       onCreated((result as { id: string }).id);
       reset();
     } catch (error) {
-      setMessage((error as Error).message);
+      if (
+        error instanceof MutationError &&
+        error.code === 'DUPLICATE_OPPORTUNITY'
+      )
+        showDuplicate(error.details);
+      else setMessage((error as Error).message);
     } finally {
       actionLock.current = false;
       setLoading(false);
     }
   };
-  const update = <K extends keyof Extraction>(key: K, value: Extraction[K]) =>
+  const update = <K extends keyof Extraction>(key: K, value: Extraction[K]) => {
+    if (duplicate) {
+      setDuplicate(null);
+      setMessage('');
+    }
     setDraft((current) => (current ? { ...current, [key]: value } : current));
+  };
+  const openExisting = async () => {
+    if (!duplicate || actionLock.current) return;
+    actionLock.current = true;
+    setLoading(true);
+    try {
+      await onOpenExisting(duplicate.id);
+    } catch (error) {
+      setGuidance((error as Error).message);
+    } finally {
+      actionLock.current = false;
+      setLoading(false);
+    }
+  };
   const addTextItem = (key: 'highlights' | 'risks', label: string) =>
     update(key, [...(draft?.[key] || []), label]);
 
@@ -209,6 +274,23 @@ export function CaptureDialog({
               </div>
             </div>
           </DialogHeader>
+          {duplicate && (
+            <div role="alert" className="space-y-3 px-6 pt-6 sm:px-8">
+              <Notice
+                title={DUPLICATE_OPPORTUNITY_MESSAGE}
+                detail={[duplicate.label, guidance].filter(Boolean).join('。')}
+                tone="amber"
+              />
+              <Button
+                variant="outline"
+                disabled={loading}
+                onClick={() => void openExisting()}
+              >
+                <ExternalLink />
+                查看已有机会
+              </Button>
+            </div>
+          )}
           {!draft ? (
             <div className="grid gap-6 px-6 py-6 sm:px-8 lg:grid-cols-[1fr_300px]">
               <div className="space-y-5">
@@ -217,7 +299,14 @@ export function CaptureDialog({
                     <Link2 className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[#8c867b]" />
                     <Input
                       value={url}
-                      onChange={(e) => setUrl(e.target.value)}
+                      onChange={(e) => {
+                        setUrl(e.target.value);
+                        if (duplicate) {
+                          setDuplicate(null);
+                          setMessage('');
+                          setGuidance('');
+                        }
+                      }}
                       placeholder="https://careers.tencent.com/..."
                       autoComplete="off"
                       spellCheck={false}
@@ -233,7 +322,14 @@ export function CaptureDialog({
                 <Field label="招聘正文" hint="可选">
                   <Textarea
                     value={text}
-                    onChange={(e) => setText(e.target.value)}
+                    onChange={(e) => {
+                      setText(e.target.value);
+                      if (duplicate) {
+                        setDuplicate(null);
+                        setMessage('');
+                        setGuidance('');
+                      }
+                    }}
                     placeholder="复制岗位名称、岗位职责、任职要求、截止时间、材料要求等内容…"
                     className="min-h-52 resize-y rounded-xl bg-white leading-6"
                   />
@@ -245,7 +341,7 @@ export function CaptureDialog({
                     tone="green"
                   />
                 )}
-                {message && (
+                {message && !duplicate && (
                   <Notice
                     title={message}
                     detail={guidance}
@@ -292,7 +388,9 @@ export function CaptureDialog({
                 <Badge className="rounded-full bg-[#e6f2ed] text-[#2d6b5d]">
                   {sourceStatus}
                 </Badge>
-                <span className="text-xs text-[#7e786e]">{message}</span>
+                {!duplicate && (
+                  <span className="text-xs text-[#7e786e]">{message}</span>
+                )}
                 <Badge variant="outline" className="rounded-full">
                   {mode === 'ai'
                     ? 'AI 草稿 · 已通过结构校验'
@@ -611,7 +709,12 @@ export function CaptureDialog({
                 <Button
                   className="rounded-xl bg-[#173f37] hover:bg-[#245d50]"
                   onClick={() => void save()}
-                  disabled={loading || !draft.organization || !draft.role}
+                  disabled={
+                    loading ||
+                    Boolean(duplicate) ||
+                    !draft.organization ||
+                    !draft.role
+                  }
                 >
                   {loading ? <Loader2 className="animate-spin" /> : <Check />}
                   保存到机会库

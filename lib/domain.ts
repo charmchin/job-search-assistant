@@ -13,6 +13,13 @@ export const ACTIVE_STAGES = STAGES.filter(
   (stage) => !['offer', 'closed'].includes(stage.id),
 );
 export const DEFAULT_REMINDER_OFFSETS = [10080, 4320, 1440, 0];
+export const APPLICATION_STAGES = ['evaluating', 'preparing'] as const;
+
+export function needsApplication(stage: string, decision?: string) {
+  return (
+    APPLICATION_STAGES.some((value) => value === stage) && decision !== 'skip'
+  );
+}
 
 export function isOpportunityActive(stage: string, decision?: string) {
   return !['offer', 'closed'].includes(stage) && decision !== 'skip';

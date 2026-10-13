@@ -6,6 +6,7 @@ import type { Activity, Extraction, Mutate } from '@/lib/client-types';
 
 export type SavedDraft = {
   id: string;
+  draftRevision: string;
   sourceUrl: string;
   sourceText: string;
   extraction: Extraction | null;
@@ -13,6 +14,7 @@ export type SavedDraft = {
 };
 type DraftSummary = {
   id: string;
+  draftRevision: string;
   organization: string;
   role: string;
   createdAt: string;
@@ -249,7 +251,13 @@ function DraftList({
     setError('');
     try {
       if (remove) {
-        await mutate('discardDraft', { id });
+        const draft = page.items.find((item) => item.id === id);
+        if (!draft?.draftRevision)
+          throw new Error('请刷新草稿列表，核对最新内容后重新确认移除。');
+        await mutate('discardDraft', {
+          id,
+          draftRevision: draft.draftRevision,
+        });
         if (alive.current) await page.load();
       } else {
         const response = await fetch(

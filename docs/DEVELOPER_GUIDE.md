@@ -214,12 +214,19 @@ ZHAOPIN_TEST_DATA_DIR="$task_launcher_dir" node scripts/check-launcher.mjs
 `fetchJobText()` 先规范化并校验 URL，再按以下顺序处理：
 
 1. 已知来源适配器；
-2. 通用服务端 HTML 正文提取；
-3. 返回结构化兜底提示，要求用户粘贴正文。
+2. 页面中单个 `JobPosting` JSON-LD 元数据与通用 HTML 正文；
+3. 空正文或动态空壳自动进入 `lib/browser-capture.ts`，运行页面脚本后再读取正文；
+4. 登录、验证码、岗位失效、加载超时分别返回中文提示，保留正文粘贴入口。
+
+浏览器优先使用已安装的 Playwright Chromium，启动失败或未安装时尝试本机 Chrome。可运行 `npm run browser:install` 安装 Chromium。每次采集使用独立、不持久化的会话，不读取用户浏览器登录状态。国聘详情页按已验证的岗位、职责、任职条件、单位及报名截止容器提取，排除导航、地图与推荐岗位。
+
+动态采集最多 40 秒、100 个请求、48 MB 已解码资源，最多 6 个并发资源读取，单个资源的下载和解压各限制为 12 MB；普通 HTML/JSON 读取原有的 2 MB 限制不变。脚本、样式、正文、XHR/fetch 的 GET 与 POST 查询经 `fetchPublicResource()` 复用下述 DNS 固定和公网校验，POST 请求体最多 64 KiB。Cookie、Authorization 和任意认证头不向来源转发。跳转目标再校验，HTTPS 不降级；禁用 Service Worker、WebSocket、下载、弹窗页面、图片及媒体。所有允许的请求由 Node 读取后 fulfill，Chromium 的未拦截请求由不可用代理及禁用域名解析阻断，不能用 `route.continue()` 绕过校验。
+
+DeepSeek 官方接口的 Flash 展示名称在请求时规范化为 `deepseek-flash`，并关闭思考模式以便完成字段整理；其他供应商模型名保持原值。密钥、正文和供应商响应不写入诊断日志。
 
 腾讯招聘岗位详情是客户端动态页面。`fetchTencentJob()` 从 URL 读取 `postId`，访问同源官方 `ByPostId` 接口，并把职责、要求、地点、业务和特别说明组装为稳定文本。不要再依赖岗位详情 HTML 中的空 `#app` 容器。
 
-所有招聘网页和来源适配器必须共用 `lib/public-fetch.ts` 的 `fetchPublicPage()`，不能直接调用 `fetch()` 或其他自动跟随跳转的客户端：
+所有招聘网页和来源适配器必须共用 `lib/public-fetch.ts` 的受限读取路径（HTML/JSON 用 `fetchPublicPage()`，浏览器资源用 `fetchPublicResource()`），不能直接调用 `fetch()` 或其他自动跟随跳转的客户端：
 
 - URL 只允许 HTTP/80 或 HTTPS/443，无用户名/密码；用标准 URL 解析器先规范化编码 IPv4、IPv6 方括号和默认端口。阻止回环、私网、链路本地、共享地址、组播、保留/文档/隧道地址及本机域名。IPv6 采用保守的普通全球单播地址策略；映射 IPv4、NAT64 及特殊用途前缀不作为招聘目的地址。
 - 每次连接前使用 `dns.lookup(..., { all: true, order: 'verbatim' })` 检查全部记录；只要包含不允许的地址就拒绝。选取已验证公网 IP，通过 Node HTTP(S) 自定义 `lookup` 固定实际连接，不进行第二次 DNS 解析；`agent: false` 和关闭地址自动选择避免复用其他连接或未验证目标。优先 IPv4，只有 IPv6 时也支持连接。
@@ -270,6 +277,12 @@ ZHAOPIN_TEST_DATA_DIR="$task_ai_data" node scripts/check-ai-extraction.mjs
 
 默认独立端口 3110，可用 `ZHAOPIN_TEST_PORT` 指定 3100–3199。测试生产包时使用另一个全新目录，并设置 `ZHAOPIN_TEST_SERVER_MODE=start`；先停止共享 `.next` 的正式服务再构建，构建时指定临时 `ZHAOPIN_DATA_DIR` 和禁用通知。浏览器优先使用系统 Chrome，否则需 Playwright Chromium。脚本覆盖坏数组/null/时间/长度/JSON、证据移除、取消、纠正保存及刷新持久化，记录桌面与窄屏截图。
 
+`lib/source-deadline.ts` 从明确的报名截止或报名时段解析日期，保留时分秒和时区；规则提取与 AI 校验共用它。`validateAiExtraction` 校验公司、岗位和地点在正文中的支持，校正或清空不受支持的截止时间，并清空可能由错误截止时间派生的任务日期。未识别的复杂日期表述保持空值，不宣称全文语义已验证。
+
+`POST /api/capture` 返回实际 `sourceText` 及 `draftRevision`。再次整理需同时提交当前 `draftId` 与 `draftRevision`，在异步调用前及事务内核对 pending 状态和内容指纹，更新原草稿；`createOpportunity` 收到版本时也核对它。`discardDraft` 必须携带列表中看到的 `{id,draftRevision}`，事务内核对 pending 状态与完整内容指纹；过期移除返回 409 / `DRAFT_CONFLICT`，必须刷新后重新确认。旧客户端缺少移除版本时拒绝并提示刷新。指纹复用规范化 SHA-256，不新增数据库列；未携带版本的旧确认调用仍兼容，因此升级后应刷新旧客户端。`tests/unit/capture-route.test.ts` 覆盖草稿冲突、等待期间确认及失败保留，浏览器脚本另覆盖返回正文、再次整理、跨标签编辑和滚动位置。
+
+`lib/opportunity-duplicate.ts` 统一提取、正式创建与身份编辑的去重规则：先匹配规范化来源链接，再匹配非空公司与岗位身份。链接仅剔除普通章节锚点和已知追踪参数，保留 Hash 路由（如 `#/job/1001`、`#!/job?id=1001`）、岗位 ID 及其他业务参数；身份统一空白、大小写与 NFKC 标点，不做别名或近似语义合并。提取前使用链接及可识别原文身份检查，AI 后在写草稿事务内重新检查；确认机会时再次检查；编辑公司、岗位或来源链接时，以合并后的完整身份检查并排除自身，冲突时整个事务不写入。仅修改备注、状态等无关字段不因旧重复数据而被阻止。重复返回 409 / `DUPLICATE_OPPORTUNITY` 和已有记录标识，客户端保留输入并可刷新后打开原记录。
+
 安全单元检查使用模拟 DNS、HTTP 流和连接选项，不实际访问私网，也不初始化数据库：
 
 ```bash
@@ -318,7 +331,7 @@ ZHAOPIN_TEST_DATA_DIR=/tmp/zhaopin-capture-check.实际随机后缀 \
 
 常规响应的 `activities` 与 `drafts` 兼容字段为空数组，表示未加载，不表示数据库记录已删除；待确认数量由 `pendingDraftCount` 给出。活动内容、草稿来源正文和提取结果不再随每分钟状态刷新传输。机会、任务、要求、节点及阶段历史仍全量读取，后者供真实漏斗计算，未在本项实现所有数据的分页或声称可无限扩展。完整 JSON 导出/恢复不受展示分页影响。
 
-活动与草稿每页固定 20 条、查询 21 条探测下一页，按 createdAt DESC / id DESC 排序。游标含列表类型、机会归属、毫秒时间及 ID，严格校验后绑定 SQL 参数；拒绝跨归属/跨列表、超长/坏游标、重复及未知查询参数。游标不是权限凭证，全部读取仍先执行 guardLocalRequest，成功/失败均 no-store。采用 keyset 而非 offset，同时间、删游标行及新增头部不会导致翻页位移；新头部须刷新查看。摘要只读公司/岗位与创建时间，不返回原文/提取体；单草稿必须仍 pending，结构失效保留原文，不编造恢复字段。
+活动与草稿每页固定 20 条、查询 21 条探测下一页，按 createdAt DESC / id DESC 排序。游标含列表类型、机会归属、毫秒时间及 ID，严格校验后绑定 SQL 参数；拒绝跨归属/跨列表、超长/坏游标、重复及未知查询参数。游标不是权限凭证，全部读取仍先执行 guardLocalRequest，成功/失败均 no-store。采用 keyset 而非 offset，同时间、删游标行及新增头部不会导致翻页位移；新头部须刷新查看。草稿列表在服务端读取有界的一页记录生成内容指纹，摘要仅返回公司/岗位、创建时间和 `draftRevision`，不返回原文/提取体；单草稿必须仍 pending，结构失效保留原文，不编造恢复字段。
 
 详情只在“节点与记录”挂载分页读取，草稿列表只在展开时读取。分页失败保持原已加载项，重试沿用失败页；取消、换归属或卸载时中止旧请求并失效化序号，迟到响应不能覆盖新会话。岗位 updatedAt 或待确认数量改变时回读首屏，手动“刷新记录”也重置到最新首屏；已经加载的更早页不会随每次常规状态读取重置。
 
@@ -361,6 +374,8 @@ expected 与普通字段共用严格 Zod 类型、大小、日期、枚举校验
 `createActionService(client, saveApiKey)` 保持原调用协议，路由仍只负责本机请求保护、受限读取和错误映射。`actions.ts` 只协调校验、内容摘要、同请求合并、持久化回执、写锁、钥匙串与 SQLite 提交；`services/dispatch.ts` 使用判别联合穷尽分派，新增 action 后遗漏分派或实体实现会被 TypeScript 的 never 检查拒绝。
 
 实体归属：`opportunities.ts` 管机会和阶段历史，`tasks.ts` 管任务和焦点选择，`milestones.ts` 管招聘节点，`materials.ts` 管共享材料及岗位要求，`workspace.ts` 管活动、草稿取消与数据库设置。`context.ts` 注入同一个事务 writer、时间和活动函数；`task-plan.ts` 让机会计划编辑与任务维护共用焦点规则。错误类在 `services/errors.ts` 定义，由 `actions.ts` 原样再导出，路由的 instanceof、状态码及错误代码不变。
+
+状态更新共用 `opportunityStatusConflict` 校验：有效投入判断为 skip 时，显式提交非 closed 阶段返回 400 / `OPPORTUNITY_STATUS_CONFLICT`，整个事务不写入；只提交 skip 判断仍自动进入 closed。编辑表单选择 skip 会立即显示 closed，矛盾输入跨标签保留并提示，禁止“保存全部修改”；恢复判断后可以一起保存目标阶段。机会库搜索使用 `query.trim().toLowerCase()`，两个筛选仍取交集。`scripts/check-opportunity-filters.mjs` 验证 90 种卡片/列表组合、全部阶段和判断切换、后台刷新、空格搜索、状态冲突及恢复。
 
 这些模块是内部实现，不是新的对外入口。只能从协调器执行已通过 schema 的命令；实体服务不得导入全局 `lib/db`、自行打开连接/事务、写回执、执行网络或原生命令，也不得成为 async。一次动作涉及多实体时全部使用传入 writer 和 timestamp，回执最后写入同一个 immediate 事务；调用钥匙串仍在协调器的事务外、进程写锁内。修改服务时必须验证关联写入和活动/回执失败均整体回滚，不能为拆文件把原子操作拆成独立提交。
 
@@ -510,7 +525,7 @@ Vitest 只匹配 `lib/**/*.test.{ts,tsx}`、`components/**/*.test.{ts,tsx}`、`t
 
 `npm run test:e2e` 自动按白名单复制代码和已安装依赖到临时项目，排除 `.env*`、原项目 `.next`、用户数据与日志。在副本中先迁移空临时库，再构建生产包；随后每组测试使用另一份全新临时目录和独立 3110–3119 端口。工作流和历史组会在自有空目录建立旧版夹具库，验证启动转换。不会复用或停止 3000 正式服务，也不会覆盖它的构建。端口被其他程序占用时应报错，不自动终止该程序。
 
-九组回归执行真实浏览器/API 断言：AI 模拟接口及坏响应回退/草稿确认、详情会话及提醒配置/上海时间、今日焦点/截止/停滞、本机来源拒绝/材料安全/备份往返、保存反馈/重复点击/事务一致性、下一步闭环/材料及要求增改删/缺失引用修复/服务重启持久化、阶段历史/真实统计/补录作废/备份重启、状态快照/活动与草稿分页/自动刷新/编辑保护、双窗口机会及关联记录冲突/任务编辑/材料版本竞争/设置/过期删除确认/核对后重建。工作流脚本 `scripts/check-workflows.mjs` 对应 `lib/workflow.test.ts`；历史脚本 `scripts/check-analytics.mjs` 对应 `lib/stage-history.test.ts`。浏览器测试不发送真实通知，不调用真实模型、钥匙串或系统文件动作；系统选择器取消通过响应夹具验证。
+十组回归执行真实浏览器/API 断言：机会库筛选/状态联动/重新推进/空格搜索、AI 模拟接口及坏响应回退/草稿确认、详情会话及提醒配置/上海时间、今日焦点/截止/停滞、本机来源拒绝/材料安全/备份往返、保存反馈/重复点击/事务一致性、下一步闭环/材料及要求增改删/缺失引用修复/服务重启持久化、阶段历史/真实统计/补录作废/备份重启、状态快照/活动与草稿分页/自动刷新/编辑保护、双窗口机会及关联记录冲突/任务编辑/材料版本竞争/设置/过期删除确认/核对后重建。工作流脚本 `scripts/check-workflows.mjs` 对应 `lib/workflow.test.ts`；历史脚本 `scripts/check-analytics.mjs` 对应 `lib/stage-history.test.ts`。浏览器测试不发送真实通知，不调用真实模型、钥匙串或系统文件动作；系统选择器取消通过响应夹具验证。
 
 macOS 优先使用已安装的 Chrome；没有 Chrome 时需要 Playwright Chromium，可先执行 `npx playwright install chromium`。测试不会自动下载浏览器。可用 `npm run test:e2e -- --grep '今日焦点'` 运行一个组，仍会执行独立构建。`-- --list` 只枚举，不构建/启动服务。
 

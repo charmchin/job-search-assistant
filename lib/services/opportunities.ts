@@ -19,8 +19,17 @@ import {
 import { STAGES } from '../domain';
 import { createTaskPlan } from './task-plan';
 import { ActionError } from './errors';
-import { opportunityConflicts, opportunityFields } from '../opportunity-edit';
-import { opportunityDeleteVersion } from '../delete-version';
+import {
+  opportunityConflicts,
+  opportunityFields,
+  opportunityStatusConflict,
+} from '../opportunity-edit';
+import { deleteVersion, opportunityDeleteVersion } from '../delete-version';
+import {
+  findDuplicateOpportunity,
+  duplicateOpportunityDetails,
+  DUPLICATE_OPPORTUNITY_MESSAGE,
+} from '../opportunity-duplicate';
 
 export type OpportunitiesCommand = CommandFor<
   | 'createOpportunity'
@@ -33,6 +42,7 @@ export type OpportunitiesCommand = CommandFor<
 export function applyOpportunityCommand(
   context: ActionContext,
   command: OpportunitiesCommand,
+  occurredAt?: Date,
 ): ActionResult {
   const { tx, timestamp, opportunity, activity } = context;
   const stageLabel = (stage: string) =>
@@ -66,10 +76,22 @@ export function applyOpportunityCommand(
         tasks: children,
         requirements,
         draftId,
+        draftRevision,
         evidence: _evidence,
         confidence: _confidence,
         ...fields
       } = command.payload;
+      const duplicate = findDuplicateOpportunity(
+        tx.select().from(opportunities).all(),
+        fields,
+      );
+      if (duplicate)
+        throw new ActionError(
+          DUPLICATE_OPPORTUNITY_MESSAGE,
+          409,
+          'DUPLICATE_OPPORTUNITY',
+          duplicateOpportunityDetails(duplicate),
+        );
       if (draftId) {
         const draft = required(
           tx
@@ -85,25 +107,13 @@ export function applyOpportunityCommand(
             409,
             'DRAFT_NOT_PENDING',
           );
+        if (draftRevision && deleteVersion(draft) !== draftRevision)
+          throw new ActionError(
+            '草稿已被重新整理，当前预览已过期。请从草稿列表载入最新内容后确认。',
+            409,
+            'DRAFT_CONFLICT',
+          );
       }
-      const duplicate = tx
-        .select()
-        .from(opportunities)
-        .all()
-        .find(
-          (row) =>
-            (fields.sourceUrl && row.sourceUrl === fields.sourceUrl) ||
-            (row.organization.trim().toLowerCase() ===
-              fields.organization.toLowerCase() &&
-              row.role.trim().toLowerCase() === fields.role.toLowerCase()),
-        );
-      if (duplicate)
-        throw new ActionError(
-          '发现疑似重复机会',
-          409,
-          'DUPLICATE_OPPORTUNITY',
-          { duplicateId: duplicate.id },
-        );
       const id = makeId('opp');
       const stage = fields.decision === 'skip' ? 'closed' : fields.stage;
       tx.insert(opportunities)
@@ -169,6 +179,42 @@ export function applyOpportunityCommand(
           'EDIT_CONFLICT',
           { fields: conflicts },
         );
+      if (
+        (['organization', 'role', 'sourceUrl'] as const).some(
+          (key) => changes[key] !== undefined && changes[key] !== current[key],
+        )
+      ) {
+        const duplicate = findDuplicateOpportunity(
+          tx
+            .select({
+              id: opportunities.id,
+              organization: opportunities.organization,
+              role: opportunities.role,
+              sourceUrl: opportunities.sourceUrl,
+            })
+            .from(opportunities)
+            .all()
+            .filter((row) => row.id !== id),
+          { ...current, ...changes },
+        );
+        if (duplicate)
+          throw new ActionError(
+            DUPLICATE_OPPORTUNITY_MESSAGE,
+            409,
+            'DUPLICATE_OPPORTUNITY',
+            duplicateOpportunityDetails(duplicate),
+          );
+      }
+      const statusConflict = opportunityStatusConflict({
+        stage: changes.stage,
+        decision: changes.decision ?? current.decision,
+      });
+      if (statusConflict)
+        throw new ActionError(
+          statusConflict,
+          400,
+          'OPPORTUNITY_STATUS_CONFLICT',
+        );
       if ((changes.decision ?? current.decision) === 'skip')
         changes.stage = 'closed';
       const nextStage = changes.stage ?? current.stage;
@@ -184,7 +230,13 @@ export function applyOpportunityCommand(
         .where(eq(opportunities.id, id))
         .run();
       if (nextStage !== current.stage)
-        recordStage(id, current.stage, nextStage, 'transition', timestamp);
+        recordStage(
+          id,
+          current.stage,
+          nextStage,
+          'transition',
+          occurredAt ?? timestamp,
+        );
       if (
         changes.nextAction !== undefined ||
         changes.nextActionAt !== undefined

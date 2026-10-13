@@ -120,7 +120,11 @@ export function TodayView({
     }
   };
 
-  if (!data.opportunities.length && !plan.actions.length)
+  if (
+    !data.opportunities.length &&
+    !plan.actions.length &&
+    !plan.upcoming.length
+  )
     return <WelcomeState openCapture={openCapture} />;
 
   return (
@@ -219,7 +223,7 @@ export function TodayView({
                 今天的推进清单
               </h2>
               <p className="mt-1 text-sm text-[#837d73]">
-                任务、招聘节点、投递截止与下一步统一排序。按事项计数，同一机会可含多项。
+                优先处理临期事项和明确的下一步；一周后的招聘节点与投递截止列在后续日程中。
               </p>
             </div>
             <Badge variant="secondary" className="rounded-full">
@@ -257,9 +261,35 @@ export function TodayView({
             </Button>
           )}
           <p className="mt-4 text-xs leading-5 text-[#8a847a]">
-            排序：逾期 → 72 小时 → 7 天 →
-            更晚或未定时间；同组按机会优先级、准确截止、最后活动依次比较。下一步是真实任务，可直接完成；投递截止请进入机会核对。
+            排序：逾期 → 72 小时 → 7 天 → 下一步 →
+            其他任务。同组按优先级与截止时间排列。已投递岗位不再催办投递截止。
           </p>
+          {plan.upcoming.length > 0 && (
+            <details
+              className="mt-4 rounded-2xl border border-[#e2ded4] p-4"
+              data-testid="today-upcoming"
+            >
+              <summary className="cursor-pointer text-sm font-semibold text-[#6d756d]">
+                后续日程 · {plan.upcoming.length} 项
+              </summary>
+              <p className="my-3 text-xs text-[#837d73]">
+                一周后的安排，临近时会自动进入推进清单。
+              </p>
+              <div className="space-y-2">
+                {plan.upcoming.map((action) => (
+                  <TodayActionRow
+                    key={action.id}
+                    action={action}
+                    featured={false}
+                    pending={pending === action.id}
+                    disabled={Boolean(pending)}
+                    onComplete={() => void complete(action)}
+                    onOpen={openOpportunity}
+                  />
+                ))}
+              </div>
+            </details>
+          )}
         </section>
         <div className="min-w-0 space-y-5">
           <DecisionInbox items={undecided} openOpportunity={openOpportunity} />
@@ -418,10 +448,12 @@ function RiskPanel({
 
 export function OpportunitiesView({
   data,
+  mutate,
   openOpportunity,
   openCapture,
 }: {
   data: WorkspaceState;
+  mutate: Mutate;
   openOpportunity: (id: string) => void;
   openCapture: () => void;
 }) {
@@ -435,7 +467,7 @@ export function OpportunitiesView({
         (item) =>
           `${item.organization} ${item.role} ${item.direction} ${item.tags.join(' ')}`
             .toLowerCase()
-            .includes(query.toLowerCase()) &&
+            .includes(query.trim().toLowerCase()) &&
           (stage === 'all' || item.stage === stage) &&
           (decision === 'all' || item.decision === decision),
       ),
@@ -454,6 +486,7 @@ export function OpportunitiesView({
           />
         </div>
         <select
+          aria-label="投入判断筛选"
           value={decision}
           onChange={(event) => setDecision(event.target.value)}
           className="h-9 rounded-xl border border-[#ddd8ce] bg-[#faf9f6] px-3 text-xs"
@@ -465,6 +498,7 @@ export function OpportunitiesView({
           <option value="skip">不再考虑</option>
         </select>
         <select
+          aria-label="招聘阶段筛选"
           value={stage}
           onChange={(event) => setStage(event.target.value)}
           className="h-9 rounded-xl border border-[#ddd8ce] bg-[#faf9f6] px-3 text-xs"
@@ -503,6 +537,7 @@ export function OpportunitiesView({
             <OpportunityCard
               key={item.id}
               item={item}
+              mutate={mutate}
               onClick={() => openOpportunity(item.id)}
             />
           ))}
@@ -528,6 +563,12 @@ export function OpportunitiesView({
                 <span className="mt-1 block truncate text-xs text-[#8a847a]">
                   {item.nextAction || '尚未设置下一步'}
                 </span>
+                {(item.latestNote?.content || item.notes) && (
+                  <span className="mt-1 block truncate text-xs text-[#6d827a]">
+                    {item.latestNote ? '最近进展' : '备注'}：
+                    {item.latestNote?.content || item.notes}
+                  </span>
+                )}
               </span>
               <span className="text-xs text-[#6f6960]">
                 {decisionLabel[item.decision]}
@@ -1006,7 +1047,14 @@ export function SettingsView({
                 placeholder="留空使用 https://api.openai.com/v1"
               />
             </Field>
-            <Field label="模型名">
+            <Field
+              label="模型名"
+              hint={
+                baseUrl.includes('api.deepseek.com')
+                  ? '官方 Flash 模型 ID：deepseek-flash'
+                  : undefined
+              }
+            >
               <Input
                 value={model}
                 onChange={(e) => setModel(e.target.value)}

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
+import { APPLICATION_STAGES } from './domain';
 import {
   deadlineDaysSchema,
   deadlineReminderAt,
@@ -78,9 +79,9 @@ export function createReminderEngine(
     };
     const opportunities = database
       .prepare(
-        "SELECT id, organization, role, deadline, reminder_days FROM opportunities WHERE stage NOT IN ('offer','closed') AND decision <> 'skip'",
+        "SELECT id, organization, role, deadline, reminder_days FROM opportunities WHERE stage IN (?,?) AND decision <> 'skip'",
       )
-      .all() as {
+      .all(...APPLICATION_STAGES) as {
       id: string;
       organization: string;
       role: string;
@@ -226,10 +227,7 @@ export function createReminderEngine(
           : entities.length === 1
             ? `该推进了：${entities[0].title.slice(0, 180)}`
             : `有 ${entities.length} 项招聘事项需要关注，打开工作台查看。`;
-        await send(
-          missed ? '求职助手 · 遗漏提醒汇总' : '求职助手',
-          message,
-        );
+        await send(missed ? '求职助手 · 遗漏提醒汇总' : '求职助手', message);
         // Notification + DB commit cannot be atomic. Prefer retry over silent loss.
         database
           .transaction(() => {

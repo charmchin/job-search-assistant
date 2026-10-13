@@ -5,6 +5,7 @@ import {
   dateTimestamp,
   isOpportunityActive,
   isStale,
+  needsApplication,
 } from '@/lib/domain';
 
 export type TodayAction = {
@@ -121,7 +122,10 @@ export function buildTodayPlan(data: WorkspaceState, now = new Date(data.now)) {
       add('milestone', node.id, node.title, node.scheduledAt, opportunity);
   }
   for (const opportunity of active) {
-    if (Number.isFinite(dateTimestamp(opportunity.deadline)))
+    if (
+      needsApplication(opportunity.stage, opportunity.decision) &&
+      Number.isFinite(dateTimestamp(opportunity.deadline))
+    )
       add(
         'deadline',
         opportunity.id,
@@ -130,7 +134,26 @@ export function buildTodayPlan(data: WorkspaceState, now = new Date(data.now)) {
         opportunity,
       );
   }
-  actions.sort((a, b) => compareActions(a, b, now));
+  const upcoming = actions
+    .filter(
+      (action) =>
+        action.dueAt &&
+        action.bucket === 3 &&
+        ['deadline', 'milestone'].includes(action.kind),
+    )
+    .sort((a, b) => compareActions(a, b, now));
+  const upcomingIds = new Set(upcoming.map((action) => action.id));
+  const actionable = actions.filter((action) => !upcomingIds.has(action.id));
+  const rank = (action: TodayAction) =>
+    action.bucket < 3
+      ? action.bucket
+      : action.kind === 'nextAction'
+        ? 3
+        : action.kind === 'task'
+          ? 4
+          : 5;
+  actionable.sort((a, b) => rank(a) - rank(b) || compareActions(a, b, now));
+  actions.splice(0, actions.length, ...actionable);
   const focus = actions[0] || null;
   const fallback =
     undecided[0] || stale[0] || [...active].sort(opportunityOrder)[0] || null;
@@ -159,6 +182,7 @@ export function buildTodayPlan(data: WorkspaceState, now = new Date(data.now)) {
   });
   return {
     actions,
+    upcoming,
     focus,
     fallback,
     undecided,

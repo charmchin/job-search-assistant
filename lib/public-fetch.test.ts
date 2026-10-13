@@ -4,7 +4,7 @@ import https from 'node:https';
 import { Readable } from 'node:stream';
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createPublicPageFetcher, isPublicAddress, PAGE_MAX_BYTES, PAGE_MAX_REDIRECTS, requestPinnedUrl, validatePublicUrl } from '@/lib/public-fetch';
+import { createPublicPageFetcher, createPublicResourceFetcher, BROWSER_RESOURCE_MAX_BYTES, isPublicAddress, PAGE_MAX_BYTES, PAGE_MAX_REDIRECTS, requestPinnedUrl, validatePublicUrl } from '@/lib/public-fetch';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -204,5 +204,130 @@ describe('Node HTTP/TLS 连接固定（模拟 transport，不发出网络请求�
     const pinned = await new Promise((resolve, reject) => captured.lookup!('jobs.example.com', {}, (error, address, family) => error ? reject(error) : resolve({ address, family })));
     expect(pinned).toEqual({ address: '1.1.1.1', family: 4 }); expect(fakeRequest.end).toHaveBeenCalledTimes(1);
     reply.destroy();
+  });
+});
+
+describe('浏览器资源仍走固定公网 IP 的受限读取', () => {
+  it('支持公开 JSON POST 查询，但不传 Cookie、Authorization 或任意认证头', async () => {
+    const { lookup, transport } = harness();
+    const read = createPublicResourceFetcher({ lookup, transport });
+    const body = Buffer.from('{"id":"123"}');
+    const result = await read(
+      'https://jobs.example.com/detail',
+      {
+        method: 'POST',
+        body,
+        headers: {
+          'content-type': 'application/json',
+          cookie: 'private',
+          authorization: 'private',
+          'x-api-key': 'private',
+        },
+      },
+      new AbortController().signal,
+    );
+    expect(result.body.toString()).toBe(html);
+    const options = (
+      transport.mock.calls[0] as unknown as Parameters<typeof requestPinnedUrl>
+    )[3];
+    expect(options).toEqual({
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+
+  it('DNS 混合私网解析在浏览器资源连接前拒绝', async () => {
+    const { lookup, transport } = harness();
+    lookup.mockResolvedValue([
+      { address: '1.1.1.1', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]);
+    await expect(
+      createPublicResourceFetcher({ lookup, transport })(
+        'https://jobs.example.com/app.js',
+        {},
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'PAGE_UNSAFE_URL' });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it('拒绝跳转到内网与 HTTPS 降级，公开跳转只返回下一跳供再次校验', async () => {
+    const { lookup, transport } = harness();
+    const read = createPublicResourceFetcher({ lookup, transport });
+    for (const location of [
+      'http://127.0.0.1/private',
+      'http://jobs.example.com/next',
+    ]) {
+      transport.mockResolvedValueOnce(response('', 302, { location }));
+      await expect(
+        read('https://jobs.example.com/role', {}, new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'PAGE_UNSAFE_URL' });
+    }
+    transport.mockResolvedValueOnce(response('', 302, { location: '/next' }));
+    const result = await read(
+      'https://jobs.example.com/role',
+      {},
+      new AbortController().signal,
+    );
+    expect(result.status).toBe(302);
+    expect(result.headers.location).toBe('https://jobs.example.com/next');
+    expect(result.body.length).toBe(0);
+  });
+
+  it('较大的脚本有独立限制，HTML 原来的大小限制没有放宽', async () => {
+    const { lookup, transport } = harness();
+    const read = createPublicResourceFetcher({ lookup, transport });
+    transport.mockResolvedValueOnce(
+      response(Buffer.alloc(PAGE_MAX_BYTES + 1), 200, {
+        'content-type': 'application/javascript',
+      }),
+    );
+    expect(
+      (
+        await read(
+          'https://jobs.example.com/app.js',
+          {},
+          new AbortController().signal,
+        )
+      ).body.length,
+    ).toBe(PAGE_MAX_BYTES + 1);
+    transport.mockResolvedValueOnce(
+      response(gzipSync(Buffer.alloc(BROWSER_RESOURCE_MAX_BYTES + 1)), 200, {
+        'content-encoding': 'gzip',
+      }),
+    );
+    await expect(
+      read('https://jobs.example.com/app.js', {}, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'PAGE_TOO_LARGE' });
+    await expect(
+      read(
+        'https://jobs.example.com/query',
+        { method: 'POST', body: Buffer.alloc(64 * 1024 + 1) },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'PAGE_TOO_LARGE' });
+  });
+
+  it('超时关闭资源请求，服务端登录错误原样保留状态供页面识别', async () => {
+    const { lookup, transport } = harness();
+    const read = createPublicResourceFetcher({ lookup, transport });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      read('https://jobs.example.com/app.js', {}, controller.signal),
+    ).rejects.toMatchObject({ code: 'PAGE_TIMEOUT' });
+    expect(transport).not.toHaveBeenCalled();
+    transport.mockResolvedValueOnce(response('login required', 401));
+    expect(
+      (
+        await read(
+          'https://jobs.example.com/detail',
+          {},
+          new AbortController().signal,
+        )
+      ).status,
+    ).toBe(401);
   });
 });

@@ -18,6 +18,34 @@ const setup = () => {
   };
 };
 describe('保存结果与请求去重（无网络）', () => {
+  it('保留已有机会的标识，供重复提示打开原记录', async () => {
+    const { client, fetcher } = setup();
+    fetcher.mockResolvedValueOnce(
+      Response.json(
+        {
+          error: '该机会已在机会库中，请勿重复添加。',
+          code: 'DUPLICATE_OPPORTUNITY',
+          duplicateId: 'existing',
+          duplicateOrganization: '原公司',
+          duplicateRole: '原岗位',
+        },
+        { status: 409 },
+      ),
+    );
+    await expect(
+      client.mutate('createOpportunity', {
+        organization: '原公司',
+        role: '原岗位',
+      }),
+    ).rejects.toMatchObject({
+      code: 'DUPLICATE_OPPORTUNITY',
+      details: {
+        duplicateId: 'existing',
+        duplicateOrganization: '原公司',
+        duplicateRole: '原岗位',
+      },
+    });
+  });
   it.each([true, false])(
     '冲突只读取最新状态，不自动重发或将草稿改为新基线（刷新=%s）',
     async (refreshed) => {

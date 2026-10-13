@@ -7,6 +7,7 @@ export class MutationError extends Error {
   constructor(
     message: string,
     public readonly code = 'SAVE_FAILED',
+    public readonly details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -70,6 +71,7 @@ export function createMutationClient(options: {
                 ? result.error
                 : '保存失败，请检查输入后重试。',
               typeof result?.code === 'string' ? result.code : 'SAVE_FAILED',
+              result || {},
             );
           }
           const valid =

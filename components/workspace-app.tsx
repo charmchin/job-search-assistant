@@ -335,6 +335,7 @@ export function WorkspaceApp() {
                   )}
                   <OpportunitiesView
                     data={data}
+                    mutate={mutate}
                     openOpportunity={setSelectedId}
                     openCapture={() => {
                       setResumedDraft(null);
@@ -398,6 +399,18 @@ export function WorkspaceApp() {
         }}
         initialDraft={captureOpen ? resumedDraft : null}
         mutate={mutate}
+        onOpenExisting={async (id) => {
+          const latest = await refresh();
+          if (!latest)
+            throw new Error('暂时无法读取机会库，请重试。当前输入已保留。');
+          if (!latest.opportunities.some((item) => item.id === id))
+            throw new Error('该机会已被移除，请重新整理。当前输入已保留。');
+          setSaveNotice(null);
+          setCaptureOpen(false);
+          setResumedDraft(null);
+          setView('opportunities');
+          setSelectedId(id);
+        }}
         onCreated={(id) => {
           setCaptureOpen(false);
           setResumedDraft(null);

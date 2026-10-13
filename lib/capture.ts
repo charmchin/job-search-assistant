@@ -1,12 +1,13 @@
-import * as cheerio from 'cheerio';
 import { fetch as fetchAi } from 'undici';
 import { settings } from '@/db/schema';
 import { db } from '@/lib/db';
 import { readApiKey } from '@/lib/secrets';
 import { toShanghaiInput } from '@/lib/reminder-policy';
 import { fetchPublicPage, validatePublicUrl } from '@/lib/public-fetch';
+import { fetchRenderedJob } from '@/lib/browser-capture';
+import { readJobPage } from '@/lib/job-page';
+import { readSourceDeadline } from '@/lib/source-deadline';
 import {
-  extractionSchema,
   readAiContent,
   validateAiExtraction,
   type Extraction,
@@ -17,7 +18,7 @@ export type { Extraction } from '@/lib/extraction';
 export type FetchResult = {
   text: string;
   sourceName: string;
-  adapter: 'tencent' | 'html';
+  adapter: 'tencent' | 'html' | 'browser' | 'structured';
 };
 
 async function fetchTencentJob(url: URL): Promise<FetchResult | null> {
@@ -62,21 +63,13 @@ export async function fetchJobText(rawUrl: string): Promise<FetchResult> {
   const knownSource = await fetchTencentJob(url);
   if (knownSource) return knownSource;
   const response = await fetchPublicPage(url, 'html');
-  const $ = cheerio.load(response.body);
-  $('script,style,noscript,svg,nav,footer,header,form').remove();
-  const title = $('title').text().trim();
-  const main =
-    $('main,article,[role="main"]').first().text() || $('body').text();
-  const text = `${title}\n${main}`
-    .replace(/[\t ]+/g, ' ')
-    .replace(/\n\s*\n+/g, '\n')
-    .trim()
-    .slice(0, 40_000);
-  if (text.length < 80) throw new Error('网页正文过少，可能需要登录或动态加载');
+  const page = readJobPage(response.body, response.url.href);
+  if (page.blocked) throw page.blocked;
+  if (!page.usable) return fetchRenderedJob(response.url.href);
   return {
-    text,
+    text: page.text,
     sourceName: response.url.hostname.replace(/^www\./, ''),
-    adapter: 'html',
+    adapter: page.structured ? 'structured' : 'html',
   };
 }
 
@@ -95,41 +88,8 @@ export function heuristicExtract(
     .split(/[|｜—]/)
     .map((part) => part.trim())
     .filter(Boolean);
-  const dateMatch = text.match(
-    /(?:截止(?:时间|日期)?|网申(?:截止)?)[：:\s]*((?:20\d{2}[年/.-])?\d{1,2}[月/.-]\d{1,2}日?(?:\s+\d{1,2}:\d{2})?)/,
-  );
-  let deadline: string | null = null;
-  if (dateMatch) {
-    const normalized = dateMatch[1]
-      .replace(/年|月/g, '-')
-      .replace(/日/g, '')
-      .replace(/[/.]/g, '-');
-    const parts = /^(?:(20\d{2})-)?(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?$/.exec(
-      normalized,
-    );
-    if (parts) {
-      const [, explicitYear, month, day, hour, minute] = parts;
-      const year = Number(
-        explicitYear || toShanghaiInput(now.toISOString()).slice(0, 4),
-      );
-      const parseYear = (value: number) => {
-        const date = `${value}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-        const parsed = extractionSchema.shape.deadline.safeParse(
-          hour === undefined
-            ? date
-            : `${date}T${hour.padStart(2, '0')}:${minute}:00+08:00`,
-        );
-        return parsed.success ? parsed.data : null;
-      };
-      deadline = parseYear(year);
-      if (
-        !explicitYear &&
-        deadline &&
-        Date.parse(deadline) < now.getTime() - 30 * 86400_000
-      )
-        deadline = parseYear(year + 1);
-    }
-  }
+  const deadlineInfo = readSourceDeadline(text, now);
+  const deadline = deadlineInfo.deadline;
   const materialNames = [
     '简历',
     '成绩单',
@@ -225,7 +185,7 @@ export function heuristicExtract(
       role: titleParts[1] || '',
       location: location || '',
       direction: direction || '',
-      deadline: dateMatch?.[0] || '',
+      deadline: deadlineInfo.evidence,
       specialNotes: specialLines.join('\n'),
       ...Object.fromEntries(
         materialNames.map((name, index) => [
@@ -251,12 +211,24 @@ export function heuristicExtract(
 async function getAiConfig() {
   const rows = await db.select().from(settings);
   const config = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  const baseUrl =
+    config.aiBaseUrl ||
+    process.env.OPENAI_BASE_URL ||
+    'https://api.openai.com/v1';
+  let model = (config.aiModel || process.env.OPENAI_MODEL || '').trim();
+  // The official console's display name is not the API model ID.
+  try {
+    if (
+      new URL(baseUrl).hostname === 'api.deepseek.com' &&
+      /^deepseek-(?:v4(?:\.1)?-)?flash$/i.test(model)
+    )
+      model = 'deepseek-flash';
+  } catch {
+    /* Invalid provider URLs follow the existing extraction fallback. */
+  }
   return {
-    baseUrl:
-      config.aiBaseUrl ||
-      process.env.OPENAI_BASE_URL ||
-      'https://api.openai.com/v1',
-    model: config.aiModel || process.env.OPENAI_MODEL || '',
+    baseUrl,
+    model,
     apiKey: await readApiKey(),
   };
 }
@@ -287,6 +259,9 @@ export async function extractJob(
         { role: 'user', content: prompt },
       ],
       response_format: { type: 'json_object' },
+      ...(new URL(config.baseUrl).hostname === 'api.deepseek.com'
+        ? { thinking: { type: 'disabled' } }
+        : {}),
     };
     const signal = AbortSignal.timeout(30_000);
     let response = await fetchAi(endpoint, {
@@ -320,10 +295,10 @@ export async function extractJob(
     return {
       extraction: validated.extraction,
       mode: 'ai',
-      ...(validated.omittedProof
+      ...(validated.omittedProof || validated.correctedFields.length
         ? {
             warning:
-              '部分依据无法在原文中核对，已移除；请重点核对没有原文依据的字段。',
+              '已移除无法核对的引用，并校正或清空缺少原文支持的关键事实；请核对公司、岗位、地点和截止时间。',
           }
         : {}),
     };

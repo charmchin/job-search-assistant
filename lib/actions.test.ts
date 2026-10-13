@@ -40,6 +40,92 @@ const opp = async (fields = {}) =>
   ).id as string;
 const rows = (table: string) => client.prepare(`SELECT * FROM ${table}`).all();
 describe('统一写入校验、事务和请求回执', () => {
+  it('编辑公司或岗位产生重复时整体拒绝，不改变任务、历史和回执', async () => {
+    const existing = await opp({ organization: '星河科技', role: 'EHS工程师' });
+    const id = await opp({
+      organization: '其他公司',
+      role: '其他岗位',
+      nextAction: '准备材料',
+    });
+    const tables = [
+      'opportunities',
+      'tasks',
+      'activities',
+      'stage_history',
+      'mutation_receipts',
+    ];
+    const before = tables.map(rows);
+    await expect(
+      service.execute(
+        command(
+          'updateOpportunity',
+          {
+            id,
+            organization: ' 星河 科技 ',
+            role: 'ehs工程师',
+            stage: 'interview',
+            nextAction: '不应写入的新任务',
+          },
+          randomUUID(),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'DUPLICATE_OPPORTUNITY',
+      details: { duplicateId: existing },
+    });
+    expect(tables.map(rows)).toEqual(before);
+  });
+  it('仅修改链接也检查重复，修改自身及不同 Hash 岗位可以保存', async () => {
+    const existing = await opp({
+      sourceUrl: 'https://jobs.example.com/#/job/1001',
+    });
+    const id = await opp({
+      role: '另一岗位',
+      sourceUrl: 'https://jobs.example.com/#/job/1002',
+    });
+    await expect(
+      service.execute(
+        command('updateOpportunity', {
+          id,
+          sourceUrl: 'https://jobs.example.com/?utm_source=share#/job/1001',
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'DUPLICATE_OPPORTUNITY',
+      details: { duplicateId: existing },
+    });
+    await service.execute(
+      command('updateOpportunity', {
+        id,
+        sourceUrl: 'https://jobs.example.com/#/job/1003',
+      }),
+    );
+    await service.execute(
+      command('updateOpportunity', { id: existing, organization: '隔离 组织' }),
+    );
+    expect(rows('opportunities')).toHaveLength(2);
+  });
+  it('只修改身份的一部分也按完整身份检查，旧重复记录仍能改备注并纠正身份', async () => {
+    const existing = await opp({ organization: '甲', role: '工程师' });
+    const id = await opp({ organization: '乙', role: '工程师' });
+    await expect(
+      service.execute(command('updateOpportunity', { id, organization: '甲' })),
+    ).rejects.toMatchObject({ code: 'DUPLICATE_OPPORTUNITY' });
+    client
+      .prepare('UPDATE opportunities SET organization=? WHERE id=?')
+      .run('甲', id);
+    await service.execute(
+      command('updateOpportunity', { id, notes: '保留旧记录的笔记' }),
+    );
+    await service.execute(
+      command('updateOpportunity', { id, role: '分析工程师' }),
+    );
+    await service.execute(
+      command('updateOpportunity', { id: existing, stage: 'interview' }),
+    );
+    expect(rows('opportunities')).toHaveLength(2);
+  });
   it.each(['organization', 'role'])('创建和更新共用非空 %s', (field) => {
     for (const action of ['createOpportunity', 'updateOpportunity'])
       expect(() =>
@@ -129,7 +215,7 @@ describe('统一写入校验、事务和请求回执', () => {
     ['updateMilestone', { status: 'done' }],
     ['updateMaterial', { name: '新名' }],
     ['updateRequirement', { completed: true }],
-    ['discardDraft', {}],
+    ['discardDraft', { draftRevision: '0'.repeat(64) }],
   ])('不存在的记录 %s 明确 404', async (action, fields) => {
     await expect(
       service.execute(command(action, { id: 'missing', ...fields })),
@@ -245,19 +331,86 @@ describe('统一写入校验、事务和请求回执', () => {
       service.execute(command('deleteOpportunity', { id }, randomUUID())),
     ).rejects.toMatchObject({ status: 404 });
   });
-  it('skip 无论携带何种合法阶段都进入 closed', async () => {
+  it('单独选择不再考虑会进入 closed，明确选择 closed 也可保存', async () => {
     const id = await opp();
     await service.execute(
       command('updateOpportunity', {
         id,
         decision: 'skip',
-        stage: 'preparing',
       }),
     );
     expect(rows('opportunities')[0]).toMatchObject({
       stage: 'closed',
       decision: 'skip',
+      closed_reason: 'withdrawn',
     });
+    await service.execute(
+      command('updateOpportunity', { id, decision: 'skip', stage: 'closed' }),
+    );
+  });
+  it.each([
+    'preparing',
+    'applied',
+    'assessment',
+    'interview',
+    'waiting',
+    'offer',
+    'evaluating',
+  ])('不再考虑时拒绝显式恢复到 %s，所有记录保持不变', async (stage) => {
+    const id = await opp({ decision: 'skip', notes: '原备注' });
+    const tables = [
+      'opportunities',
+      'tasks',
+      'activities',
+      'stage_history',
+      'mutation_receipts',
+    ];
+    const before = tables.map(rows);
+    await expect(
+      service.execute(
+        command(
+          'updateOpportunity',
+          { id, stage, notes: '不应写入', nextAction: '不应新建任务' },
+          randomUUID(),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: 'OPPORTUNITY_STATUS_CONFLICT',
+    });
+    expect(tables.map(rows)).toEqual(before);
+  });
+  it('显式矛盾的阶段与不再考虑被拒绝，恢复判断和阶段可以一起提交', async () => {
+    const id = await opp({ stage: 'interview', decision: 'pursue' });
+    await expect(
+      service.execute(
+        command('updateOpportunity', {
+          id,
+          decision: 'skip',
+          stage: 'preparing',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'OPPORTUNITY_STATUS_CONFLICT' });
+    expect(rows('opportunities')[0]).toMatchObject({
+      stage: 'interview',
+      decision: 'pursue',
+    });
+    await service.execute(
+      command('updateOpportunity', { id, decision: 'skip' }),
+    );
+    await service.execute(
+      command('updateOpportunity', {
+        id,
+        decision: 'hold',
+        stage: 'interview',
+      }),
+    );
+    expect(rows('opportunities')[0]).toMatchObject({
+      stage: 'interview',
+      decision: 'hold',
+      closed_reason: 'unknown',
+    });
+    expect(rows('stage_history')).toHaveLength(3);
   });
   it('钥匙串失败数据库不变；成功只保存摘要回执，不保存密钥', async () => {
     const input = command(

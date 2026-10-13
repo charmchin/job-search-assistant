@@ -60,6 +60,16 @@ const test = base.extend<{
 });
 const cases = [
   [
+    '机会卡片状态、快捷投递、记录和备注同步及手机布局',
+    'check-opportunity-progress.mjs',
+    3120,
+  ],
+  [
+    '机会库筛选、状态联动校验、重新推进与搜索空格',
+    'check-opportunity-filters.mjs',
+    3114,
+  ],
+  [
     '机会编辑并发保护、双窗口冲突保留与独立字段保存',
     'check-edit-conflicts.mjs',
     3116,

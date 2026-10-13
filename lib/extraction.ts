@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readSourceDeadline } from './source-deadline';
 
 // Reject calendar rollover (e.g. February 30), and ambiguous local datetimes.
 const dateText = z
@@ -142,22 +143,58 @@ export function validateAiExtraction(
     else if (quote.trim()) omittedProof = true;
   }
   extraction.evidence = evidence;
-  return { extraction, omittedProof };
+  const correctedFields: string[] = [];
+  for (const key of ['organization', 'role', 'location'] as const) {
+    if (extraction[key] && !source.includes(normalizeProof(extraction[key]))) {
+      extraction[key] = source.includes(normalizeProof(fallback[key]))
+        ? fallback[key]
+        : '';
+      delete evidence[key];
+      correctedFields.push(key);
+    }
+  }
+  // A syntactically valid date is not evidence. Use the actual application
+  // deadline in the source, preserving its stated time and timezone.
+  if (extraction.deadline) {
+    const dates = readSourceDeadline(sourceText);
+    const selected =
+      dates.candidates.length === 1
+        ? dates.candidates[0]
+        : dates.candidates.find(
+            (item) =>
+              item.deadline === extraction.deadline &&
+              evidence.deadline &&
+              normalizeProof(evidence.deadline).includes(
+                normalizeProof(item.dateText),
+              ),
+          );
+    const deadline = selected?.deadline ?? null;
+    if (deadline !== extraction.deadline) {
+      correctedFields.push('deadline');
+      extraction.deadline = deadline;
+      // These suggestions may have been scheduled relative to an invented date.
+      extraction.tasks = extraction.tasks.map((task) => ({
+        ...task,
+        dueAt: null,
+      }));
+    }
+    if (selected) evidence.deadline = selected.evidence;
+    else delete evidence.deadline;
+  }
+  return { extraction, omittedProof, correctedFields };
 }
 
 export const AI_RESPONSE_MAX_BYTES = 256 * 1024;
-export async function readAiContent(
-  response: {
-    headers: Pick<Headers, 'get'>;
-    body: {
-      cancel(): Promise<void>;
-      getReader(): Pick<
-        ReadableStreamDefaultReader<Uint8Array>,
-        'read' | 'cancel' | 'releaseLock'
-      >;
-    } | null;
-  },
-): Promise<string> {
+export async function readAiContent(response: {
+  headers: Pick<Headers, 'get'>;
+  body: {
+    cancel(): Promise<void>;
+    getReader(): Pick<
+      ReadableStreamDefaultReader<Uint8Array>,
+      'read' | 'cancel' | 'releaseLock'
+    >;
+  } | null;
+}): Promise<string> {
   const length = response.headers.get('content-length');
   if (length && Number(length) > AI_RESPONSE_MAX_BYTES) {
     await response.body?.cancel();

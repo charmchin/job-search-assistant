@@ -176,17 +176,84 @@ describe('AI 草稿运行时校验', () => {
     '2026-12-01T12:00Z',
     '2026-12-01T12:00:00.123-05:00',
   ])('规范化有效日期 %s', (deadline) => {
-    expect(validate({ role: '研发岗', deadline }).extraction.deadline).toBe(
-      new Date(deadline).toISOString(),
-    );
+    expect(
+      validateAiExtraction(
+        { role: '研发岗', deadline },
+        fallback,
+        `研发岗\n报名截止：${deadline}`,
+        '',
+      ).extraction.deadline,
+    ).toBe(new Date(deadline).toISOString());
   });
   it('只有日期时使用上海 23:59，支持已过期日期及 null', () => {
     expect(
-      validate({ role: '研发岗', deadline: '2020-01-31' }).extraction.deadline,
+      validateAiExtraction(
+        { role: '研发岗', deadline: '2020-01-31' },
+        fallback,
+        '研发岗\n报名截止：2020-01-31',
+        '',
+      ).extraction.deadline,
     ).toBe('2020-01-31T15:59:00.000Z');
     expect(
       validate({ role: '研发岗', deadline: null }).extraction.deadline,
     ).toBeNull();
+  });
+  it('原文没有截止日期时移除虚构日期及其派生任务时间', () => {
+    const result = validateAiExtraction(
+      {
+        role: '研发岗',
+        deadline: '2030-01-01',
+        tasks: [
+          {
+            title: '准备材料',
+            dueAt: '2029-12-30',
+            estimatedMinutes: 30,
+            source: 'ai',
+          },
+        ],
+      },
+      fallback,
+      '星河科技｜研发岗\n工作地点：上海\n长期招聘',
+      '',
+    );
+    expect(result.extraction.deadline).toBeNull();
+    expect(result.extraction.tasks[0].dueAt).toBeNull();
+    expect(result.correctedFields).toContain('deadline');
+  });
+  it('保留原文具体秒数，校正 AI 擅自改动的截止时间', () => {
+    const result = validateAiExtraction(
+      { role: '研发岗', deadline: '2030-01-01' },
+      fallback,
+      '星河科技｜研发岗\n报名截止：2026-12-31 23:59:59',
+      '',
+    );
+    expect(result.extraction.deadline).toBe('2026-12-31T15:59:59.000Z');
+    expect(result.extraction.evidence.deadline).toContain('23:59:59');
+  });
+  it('多个报名日期且没有可核对的引用时不擅自选择', () => {
+    const result = validateAiExtraction(
+      { role: '研发岗', deadline: '2026-12-20' },
+      fallback,
+      '研发岗\n一批报名截止：2026-12-20\n二批报名截止：2026-12-31',
+      '',
+    );
+    expect(result.extraction.deadline).toBeNull();
+  });
+  it('已存在但与字段无关的引用不能支持虚构公司与地点', () => {
+    const result = validate({
+      organization: '虚构公司',
+      role: '虚构岗位',
+      location: '北京',
+      evidence: { organization: '研发岗', location: '上海' },
+    });
+    expect(result.extraction.organization).toBe('星河科技');
+    expect(result.extraction.role).toBe('研发岗');
+    expect(result.extraction.location).toBe('上海');
+    expect(result.correctedFields).toEqual([
+      'organization',
+      'role',
+      'location',
+    ]);
   });
   it('遗漏字段使用规则；明确空数组不被规则覆盖；最终完整 schema 可读', () => {
     const result = validate({

@@ -96,6 +96,52 @@ const plan = (patch: Partial<WorkspaceState>) =>
   buildTodayPlan(state(patch), now);
 
 describe('四类今日事项与焦点', () => {
+  it('远期截止和节点进入后续日程，明确下一步优先于其他未定时间任务', () => {
+    const result = plan({
+      opportunities: [opp('a', { deadline: date(1800) })],
+      tasks: [
+        task('普通任务', 'a', null),
+        { ...task('准备简历', 'a', null), isNextAction: true },
+      ],
+      milestones: [node('远期面试', 'a', 500)],
+    });
+    expect(result.focus?.title).toBe('准备简历');
+    expect(result.actions.map((a) => a.title)).toEqual([
+      '准备简历',
+      '普通任务',
+    ]);
+    expect(result.upcoming.map((a) => a.id)).toEqual([
+      'milestone:远期面试',
+      'deadline:a',
+    ]);
+    expect(result.urgentCount).toBe(0);
+  });
+  it('只有远期截止时先做投入判断；临近一周后自动进入清单', () => {
+    const data = state({
+      opportunities: [opp('a', { decision: 'undecided', deadline: date(200) })],
+    });
+    const before = buildTodayPlan(data, now);
+    expect(before.focus).toBeNull();
+    expect(before.fallbackTitle).toContain('判断');
+    expect(before.upcoming).toHaveLength(1);
+    const after = buildTodayPlan(data, new Date(now.getTime() + 33 * 3600000));
+    expect(after.focus?.kind).toBe('deadline');
+    expect(after.upcoming).toHaveLength(0);
+  });
+  it.each(['applied', 'assessment', 'interview', 'waiting', 'offer'])(
+    '%s 不再催投递截止，保留真实任务与节点',
+    (stage) => {
+      const result = plan({
+        opportunities: [opp('a', { stage, deadline: date(-10) })],
+        tasks: [task('跟进', 'a', null)],
+        milestones: [node('招聘节点', 'a', 4)],
+      });
+      expect(result.actions.some((a) => a.kind === 'deadline')).toBe(false);
+      expect(result.focus?.kind).toBe('milestone');
+      expect(result.actions).toHaveLength(2);
+      expect(result.urgentCount).toBe(1);
+    },
+  );
   it('统一截止/节点/下一步/任务，不依赖服务端任务数组的原有顺序', () => {
     const result = plan({
       opportunities: [

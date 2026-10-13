@@ -84,7 +84,8 @@ try {
 } finally {
   if (browser) await browser.close();
   for (const id of draftIds) {
-    const response = await fetch(new URL('/api/action', baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'discardDraft', payload: { id } }) });
+    const saved = await (await fetch(new URL('/api/state?section=draft&id=' + encodeURIComponent(id), baseUrl))).json();
+    const response = await fetch(new URL('/api/action', baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'discardDraft', payload: { id, draftRevision: saved.draftRevision } }) });
     assert.equal(response.status, 200);
   }
   disk.close();

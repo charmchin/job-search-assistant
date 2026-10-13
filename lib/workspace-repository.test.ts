@@ -129,7 +129,7 @@ describe('一次分组的工作区快照', () => {
     expect(check).toHaveBeenCalledTimes(1);
     expect(state.materials.every((m) => !m.fileExists)).toBe(true);
   });
-  it('完整活动和草稿正文不进入周期性响应，备份内容不变', () => {
+  it('活动只返回限长预览，完整活动和草稿正文不进入响应，备份内容不变', () => {
     owner('a');
     const body = 'private-body-sentinel'.repeat(1000);
     const insert = client.prepare(
@@ -150,9 +150,34 @@ describe('一次分组的工作区快照', () => {
     const before = client.serialize();
     const state = readWorkspaceState(db, now);
     expect(state.pendingDraftCount).toBe(100);
-    expect(JSON.stringify(state)).not.toContain('private-body-sentinel');
+    expect(state.opportunities[0].latestNote?.content).toBe(body.slice(0, 240));
+    expect(JSON.stringify(state)).not.toContain(body);
     expect(JSON.stringify(state).length).toBeLessThan(3000);
     expect(client.serialize()).toEqual(before);
+  });
+  it('每个机会只取最新备注，其他操作不会遮掉进展，同时间按 ID 稳定排序', () => {
+    owner('a');
+    owner('b');
+    owner('empty');
+    for (const [id, opportunityId, type, content, createdAt] of [
+      ['a1', 'a', 'note', '先投递', now],
+      ['a2', 'a', 'note', '收到面试邀请', now],
+      ['a3', 'a', 'updated', '更新了机会信息', new Date(now.getTime() + 1000)],
+      ['b1', 'b', 'note', '另一公司的进展', now],
+    ] as const)
+      db.insert(schema.activities)
+        .values({ id, opportunityId, type, content, createdAt })
+        .run();
+    const state = readWorkspaceState(db, now);
+    expect(
+      state.opportunities.find((o) => o.id === 'a')?.latestNote,
+    ).toMatchObject({ id: 'a2', content: '收到面试邀请' });
+    expect(
+      state.opportunities.find((o) => o.id === 'b')?.latestNote?.content,
+    ).toBe('另一公司的进展');
+    expect(
+      state.opportunities.find((o) => o.id === 'empty')?.latestNote,
+    ).toBeNull();
   });
   it('上海跨日后逾期排序与五天停滞重新计算', () => {
     owner('a');

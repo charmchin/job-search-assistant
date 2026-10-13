@@ -10,6 +10,8 @@ import {
 } from './context';
 import { ActionError } from './errors';
 import { assertSettingsEdit, readEditableSettings } from './settings-guard';
+import { deleteVersion } from '../delete-version';
+import { applyOpportunityCommand } from './opportunities';
 
 export type WorkspaceCommand = CommandFor<
   'addActivity' | 'discardDraft' | 'saveSettings'
@@ -22,6 +24,15 @@ export function applyWorkspaceCommand(
   const { tx, timestamp, activity } = context;
   switch (command.action) {
     case 'addActivity':
+      if (command.payload.stage)
+        applyOpportunityCommand(context, {
+          action: 'updateOpportunity',
+          payload: {
+            id: command.payload.opportunityId,
+            stage: command.payload.stage,
+            expected: command.payload.expectedStatus,
+          },
+        });
       activity(
         command.payload.opportunityId,
         command.payload.type,
@@ -29,7 +40,7 @@ export function applyWorkspaceCommand(
       );
       return { ok: true };
     case 'discardDraft': {
-      const { id } = command.payload;
+      const { id, draftRevision } = command.payload;
       const current = required(
         tx
           .select()
@@ -42,6 +53,15 @@ export function applyWorkspaceCommand(
         throw new ActionError(
           '已确认的草稿不能取消，请在机会库处理正式记录。',
           409,
+        );
+      if (
+        current.status !== 'pending' ||
+        deleteVersion(current) !== draftRevision
+      )
+        throw new ActionError(
+          '未移除：草稿已被其他操作更新或移除。请刷新草稿列表，核对最新内容后重新确认。',
+          409,
+          'DRAFT_CONFLICT',
         );
       tx.update(extractionDrafts)
         .set({ status: 'discarded' })

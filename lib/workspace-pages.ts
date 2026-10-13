@@ -1,9 +1,10 @@
-import { and, desc, eq, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, lt, or } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { z } from 'zod';
 import * as schema from '@/db/schema';
 import { extractionSchema } from './extraction';
 import { ActionError } from './actions';
+import { deleteVersion } from './delete-version';
 
 export const WORKSPACE_PAGE_SIZE = 20;
 const id = z.string().min(1).max(200);
@@ -96,6 +97,7 @@ export function readWorkspacePage(
     const parsed = extractionSchema.safeParse(row.extractedJson);
     return {
       id: row.id,
+      draftRevision: deleteVersion(row),
       sourceUrl: row.sourceUrl,
       sourceText: row.sourceText,
       extraction: parsed.success ? parsed.data : null,
@@ -138,14 +140,10 @@ export function readWorkspacePage(
       return page(rows, 'activities', query.opportunityId);
     });
   }
-  // Do not read extracted_json/source_text into JS for a list or periodic poll.
+  // Only this explicitly requested, bounded page is read to derive revisions.
+  // Full source/extraction content is never returned in the list or state poll.
   const rows = db
-    .select({
-      id: extractionDrafts.id,
-      createdAt: extractionDrafts.createdAt,
-      organization: sql<string>`coalesce(substr(cast(json_extract(${extractionDrafts.extractedJson}, '$.organization') as text), 1, 300), '')`,
-      role: sql<string>`coalesce(substr(cast(json_extract(${extractionDrafts.extractedJson}, '$.role') as text), 1, 300), '')`,
-    })
+    .select()
     .from(extractionDrafts)
     .where(
       and(
@@ -164,5 +162,20 @@ export function readWorkspacePage(
     .orderBy(desc(extractionDrafts.createdAt), desc(extractionDrafts.id))
     .limit(WORKSPACE_PAGE_SIZE + 1)
     .all();
-  return page(rows, 'drafts');
+  return page(
+    rows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      draftRevision: deleteVersion(row),
+      organization:
+        typeof row.extractedJson?.organization === 'string'
+          ? row.extractedJson.organization.slice(0, 300)
+          : '',
+      role:
+        typeof row.extractedJson?.role === 'string'
+          ? row.extractedJson.role.slice(0, 300)
+          : '',
+    })),
+    'drafts',
+  );
 }

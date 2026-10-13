@@ -392,6 +392,34 @@ try {
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   );
+  await clearFixtures();
+  const future = await opp('远期截止组织', {
+    decision: 'undecided',
+    deadline: at(1800),
+    nextAction: '先核对专业与准备简历',
+  });
+  await reload();
+  await focusTitle('先核对专业与准备简历');
+  const upcoming = page.getByTestId('today-upcoming');
+  await upcoming.getByText('后续日程 · 1 项', { exact: true }).waitFor();
+  assert.equal(
+    await upcoming.getByTestId(`today-action-deadline:${future}`).isVisible(),
+    false,
+  );
+  await upcoming.locator('summary').click();
+  await upcoming.getByTestId(`today-action-deadline:${future}`).waitFor();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.screenshot({
+    path: path.join(resolved, 'today-actionable-and-upcoming.png'),
+  });
+  await action('updateOpportunity', { id: future, stage: 'applied' });
+  await reload();
+  await focusTitle('先核对专业与准备简历');
+  assert.equal(await page.getByTestId('today-upcoming').count(), 0);
+  assert.equal(
+    await queue.getByTestId(`today-action-deadline:${future}`).count(),
+    0,
+  );
   assert.deepEqual(errors, []);
   await page.screenshot({ path: path.join(resolved, 'today-long-mobile.png') });
   assert.equal(
